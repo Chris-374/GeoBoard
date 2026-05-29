@@ -1,5 +1,5 @@
 /*
- * geoboard_client_mpi.c
+ * geoboard_client_mpi_chacha20.c
  * Cliente inicial para GeoBoard Interactivo.
  *
  * Este programa NO usa sockets. El envio al servidor se hace unicamente
@@ -12,6 +12,10 @@
  *
  * Ejemplo futuro de ejecucion con MPMD:
  *   mpirun -np 1 ./geoboard_client imagen.pgm : -np 1 ./geoboard_server : -np 3 ./geoboard_worker
+ *
+ *   - ChaCha20 implementado en C.
+ *   - La key es compartida entre cliente y servidor para el prototipo.
+ *   - El cliente envia al servidor el nonce y el counter usados para el cifrado.
  */
 
 #include <mpi.h>
@@ -25,10 +29,34 @@
 #define GEOBOARD_SERVER_RANK 1
 
 #define GEOBOARD_MAGIC   0x47424F44u  /* 'GBOD' */
-#define GEOBOARD_VERSION 1u
+#define GEOBOARD_VERSION 2u
+#define GEOBOARD_CHUNK_SIZE 65536u
 
-#define GEOBOARD_DEFAULT_SEED 0x1234ABCDu
-#define GEOBOARD_CHUNK_SIZE   65536u
+#define CHACHA20_KEY_SIZE   32u
+#define CHACHA20_NONCE_SIZE 12u
+#define CHACHA20_BLOCK_SIZE 64u
+#define CHACHA20_DEFAULT_COUNTER 1u
+
+/*
+ * Key compartida para el prototipo.
+ * Debe existir exactamente igual en el servidor para poder descifrar.
+ */
+static const uint8_t GEOBOARD_CHACHA20_KEY[CHACHA20_KEY_SIZE] = {
+    0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87,
+    0x98, 0xA9, 0xBA, 0xCB, 0xDC, 0xED, 0xFE, 0x0F,
+    0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00
+};
+
+/*
+ * Nonce por defecto para el prototipo.
+ * Igual que el counter, se envia al servidor por MPI para que pueda descifrar.
+ */
+static const uint8_t GEOBOARD_DEFAULT_NONCE[CHACHA20_NONCE_SIZE] = {
+    0x47, 0x45, 0x4F, 0x42,
+    0x4F, 0x41, 0x52, 0x44,
+    0x00, 0x00, 0x00, 0x01
+};
 
 /* Tags MPI usados por el protocolo cliente -> servidor. */
 enum {
@@ -36,8 +64,9 @@ enum {
     TAG_VERSION,
     TAG_FILE_SIZE,
     TAG_FILENAME_LEN,
-    TAG_KEY_SEED,
+    TAG_COUNTER,
     TAG_CHUNK_SIZE,
+    TAG_NONCE,
     TAG_FILENAME,
     TAG_FILE_CHUNK,
     TAG_END_OF_FILE
@@ -53,9 +82,13 @@ static const char *get_filename_from_path(const char *path) {
 
 static void print_usage(const char *program_name) {
     fprintf(stderr, "Uso:\n");
-    fprintf(stderr, "  %s <imagen.pgm|bmp|raw> [semilla_cifrado]\n", program_name);
+    fprintf(stderr, "  %s <imagen.pgm|bmp|raw> [counter]\n", program_name);
     fprintf(stderr, "\nEjemplo futuro con OpenMPI:\n");
     fprintf(stderr, "  mpirun -np 1 %s images/cuadrado.pgm : -np 1 ./geoboard_server : -np 3 ./geoboard_worker\n", program_name);
+    fprintf(stderr, "\nNotas:\n");
+    fprintf(stderr, "  - La key de ChaCha20 esta compartida en el codigo del cliente y servidor.\n");
+    fprintf(stderr, "  - El nonce se envia por MPI como metadata.\n");
+    fprintf(stderr, "  - El counter es opcional y por defecto vale %u.\n", CHACHA20_DEFAULT_COUNTER);
 }
 
 static int read_complete_file(const char *path, uint8_t **out_data, uint64_t *out_size) {
@@ -120,26 +153,112 @@ static int read_complete_file(const char *path, uint8_t **out_data, uint64_t *ou
     return 0;
 }
 
-/*
- * Cifrado inicial simple por flujo XOR.
- * Es simetrico: aplicar esta misma funcion otra vez con la misma semilla descifra.
- * Para el prototipo inicial sirve para cumplir el flujo de informacion cifrada.
- */
-static uint8_t next_key_byte(uint32_t *state) {
-    *state = (*state * 1664525u) + 1013904223u;
-    return (uint8_t)((*state >> 24) & 0xFFu);
+static uint32_t rotl32(uint32_t value, int bits) {
+    return (value << bits) | (value >> (32 - bits));
 }
 
-static void encrypt_bytes(uint8_t *data, uint64_t size, uint32_t seed) {
-    uint64_t i = 0;
-    uint32_t state = seed;
+static uint32_t load32_le(const uint8_t *src) {
+    return ((uint32_t)src[0]) |
+           ((uint32_t)src[1] << 8) |
+           ((uint32_t)src[2] << 16) |
+           ((uint32_t)src[3] << 24);
+}
 
-    for (i = 0; i < size; i++) {
-        data[i] = (uint8_t)(data[i] ^ next_key_byte(&state));
+static void store32_le(uint8_t *dst, uint32_t value) {
+    dst[0] = (uint8_t)(value & 0xFFu);
+    dst[1] = (uint8_t)((value >> 8) & 0xFFu);
+    dst[2] = (uint8_t)((value >> 16) & 0xFFu);
+    dst[3] = (uint8_t)((value >> 24) & 0xFFu);
+}
+
+static void quarter_round(uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d) {
+    *a += *b; *d ^= *a; *d = rotl32(*d, 16);
+    *c += *d; *b ^= *c; *b = rotl32(*b, 12);
+    *a += *b; *d ^= *a; *d = rotl32(*d, 8);
+    *c += *d; *b ^= *c; *b = rotl32(*b, 7);
+}
+
+static void chacha20_block(const uint8_t key[CHACHA20_KEY_SIZE],
+                           uint32_t counter,
+                           const uint8_t nonce[CHACHA20_NONCE_SIZE],
+                           uint8_t output[CHACHA20_BLOCK_SIZE]) {
+    static const uint32_t constants[4] = {
+        0x61707865u, 0x3320646eu, 0x79622d32u, 0x6b206574u
+    };
+
+    uint32_t state[16];
+    uint32_t working[16];
+    int i;
+
+    state[0] = constants[0];
+    state[1] = constants[1];
+    state[2] = constants[2];
+    state[3] = constants[3];
+
+    for (i = 0; i < 8; i++) {
+        state[4 + i] = load32_le(key + (i * 4));
+    }
+
+    state[12] = counter;
+    state[13] = load32_le(nonce + 0);
+    state[14] = load32_le(nonce + 4);
+    state[15] = load32_le(nonce + 8);
+
+    for (i = 0; i < 16; i++) {
+        working[i] = state[i];
+    }
+
+    for (i = 0; i < 10; i++) {
+        /* Column rounds */
+        quarter_round(&working[0], &working[4], &working[8],  &working[12]);
+        quarter_round(&working[1], &working[5], &working[9],  &working[13]);
+        quarter_round(&working[2], &working[6], &working[10], &working[14]);
+        quarter_round(&working[3], &working[7], &working[11], &working[15]);
+
+        /* Diagonal rounds */
+        quarter_round(&working[0], &working[5], &working[10], &working[15]);
+        quarter_round(&working[1], &working[6], &working[11], &working[12]);
+        quarter_round(&working[2], &working[7], &working[8],  &working[13]);
+        quarter_round(&working[3], &working[4], &working[9],  &working[14]);
+    }
+
+    for (i = 0; i < 16; i++) {
+        working[i] += state[i];
+        store32_le(output + (i * 4), working[i]);
     }
 }
 
-static int send_metadata_to_server(uint64_t file_size, uint32_t filename_len, uint32_t seed) {
+static void chacha20_encrypt_bytes(uint8_t *data,
+                                   uint64_t size,
+                                   const uint8_t key[CHACHA20_KEY_SIZE],
+                                   const uint8_t nonce[CHACHA20_NONCE_SIZE],
+                                   uint32_t initial_counter) {
+    uint8_t keystream[CHACHA20_BLOCK_SIZE];
+    uint64_t offset = 0;
+    uint32_t counter = initial_counter;
+
+    while (offset < size) {
+        uint32_t i;
+        uint64_t remaining = size - offset;
+        uint32_t block_bytes = (remaining > CHACHA20_BLOCK_SIZE)
+            ? CHACHA20_BLOCK_SIZE
+            : (uint32_t)remaining;
+
+        chacha20_block(key, counter, nonce, keystream);
+
+        for (i = 0; i < block_bytes; i++) {
+            data[offset + i] ^= keystream[i];
+        }
+
+        offset += block_bytes;
+        counter++;
+    }
+}
+
+static int send_metadata_to_server(uint64_t file_size,
+                                   uint32_t filename_len,
+                                   uint32_t counter,
+                                   const uint8_t nonce[CHACHA20_NONCE_SIZE]) {
     const uint32_t magic = GEOBOARD_MAGIC;
     const uint32_t version = GEOBOARD_VERSION;
     const uint32_t chunk_size = GEOBOARD_CHUNK_SIZE;
@@ -160,11 +279,15 @@ static int send_metadata_to_server(uint64_t file_size, uint32_t filename_len, ui
         return -1;
     }
 
-    if (MPI_Send(&seed, 1, MPI_UINT32_T, GEOBOARD_SERVER_RANK, TAG_KEY_SEED, MPI_COMM_WORLD) != MPI_SUCCESS) {
+    if (MPI_Send(&counter, 1, MPI_UINT32_T, GEOBOARD_SERVER_RANK, TAG_COUNTER, MPI_COMM_WORLD) != MPI_SUCCESS) {
         return -1;
     }
 
     if (MPI_Send(&chunk_size, 1, MPI_UINT32_T, GEOBOARD_SERVER_RANK, TAG_CHUNK_SIZE, MPI_COMM_WORLD) != MPI_SUCCESS) {
+        return -1;
+    }
+
+    if (MPI_Send((void *)nonce, CHACHA20_NONCE_SIZE, MPI_BYTE, GEOBOARD_SERVER_RANK, TAG_NONCE, MPI_COMM_WORLD) != MPI_SUCCESS) {
         return -1;
     }
 
@@ -215,8 +338,11 @@ int main(int argc, char **argv) {
     const char *filename = NULL;
     uint8_t *image_data = NULL;
     uint64_t image_size = 0;
-    uint32_t seed = GEOBOARD_DEFAULT_SEED;
+    uint32_t counter = CHACHA20_DEFAULT_COUNTER;
     uint32_t filename_len = 0;
+    uint8_t nonce[CHACHA20_NONCE_SIZE];
+
+    memcpy(nonce, GEOBOARD_DEFAULT_NONCE, CHACHA20_NONCE_SIZE);
 
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -248,13 +374,13 @@ int main(int argc, char **argv) {
 
     if (argc >= 3) {
         char *end_ptr = NULL;
-        unsigned long parsed_seed = strtoul(argv[2], &end_ptr, 0);
+        unsigned long parsed_counter = strtoul(argv[2], &end_ptr, 0);
         if (end_ptr == argv[2] || *end_ptr != '\0') {
-            fprintf(stderr, "[CLIENTE] Semilla invalida. Use decimal o hexadecimal, por ejemplo 0x1234ABCD.\n");
+            fprintf(stderr, "[CLIENTE] Counter invalido. Use decimal o hexadecimal, por ejemplo 1 o 0x1.\n");
             MPI_Finalize();
             return EXIT_FAILURE;
         }
-        seed = (uint32_t)parsed_seed;
+        counter = (uint32_t)parsed_counter;
     }
 
     if (filename_len == 0) {
@@ -270,11 +396,11 @@ int main(int argc, char **argv) {
     }
 
     printf("[CLIENTE] Imagen cargada: %llu bytes\n", (unsigned long long)image_size);
-    printf("[CLIENTE] Cifrando contenido byte por byte...\n");
-    encrypt_bytes(image_data, image_size, seed);
+    printf("[CLIENTE] Cifrando contenido con ChaCha20...\n");
+    chacha20_encrypt_bytes(image_data, image_size, GEOBOARD_CHACHA20_KEY, nonce, counter);
 
     printf("[CLIENTE] Enviando metadata al servidor MPI rank %d...\n", GEOBOARD_SERVER_RANK);
-    if (send_metadata_to_server(image_size, filename_len, seed) != 0) {
+    if (send_metadata_to_server(image_size, filename_len, counter, nonce) != 0) {
         fprintf(stderr, "[CLIENTE] Error enviando metadata al servidor.\n");
         free(image_data);
         MPI_Finalize();
@@ -291,7 +417,15 @@ int main(int argc, char **argv) {
 
     printf("[CLIENTE] Archivo enviado correctamente por OpenMPI.\n");
     printf("[CLIENTE] Nombre enviado: %s\n", filename);
-    printf("[CLIENTE] Semilla enviada: 0x%08X\n", seed);
+    printf("[CLIENTE] Counter enviado: %u\n", counter);
+    printf("[CLIENTE] Nonce enviado: ");
+    for (int i = 0; i < (int)CHACHA20_NONCE_SIZE; i++) {
+        printf("%02X", nonce[i]);
+        if (i + 1 < (int)CHACHA20_NONCE_SIZE) {
+            printf(":");
+        }
+    }
+    printf("\n");
 
     free(image_data);
     MPI_Finalize();
