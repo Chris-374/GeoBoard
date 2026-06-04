@@ -3,28 +3,196 @@
  *
  * Procesamiento local de cada worker.
  *
- * Cada worker recibe 3 regiones. El payload contiene los pixeles de esas
- * regiones concatenados en el mismo orden en que vienen descritas en el header.
+ * Esta version agrega una carga computacional real para justificar mejor
+ * el procesamiento distribuido:
  *
- * El procesamiento implementado es simple, pero defendible:
  * - binarizacion por umbral
  * - conteo de pixeles activos
- * - deteccion aproximada de bordes
  * - bounding box local
  * - reduccion a mascara parcial 8x8
+ * - varias pasadas pesadas de filtrado 3x3 + deteccion Sobel aproximada
+ *
+ * La cantidad de pasadas pesadas se controla con la variable de entorno:
+ *
+ *   export GEOBOARD_HEAVY_PASSES=8
+ *
+ * Si no se define, se usa DEFAULT_HEAVY_PASSES.
+ *
+ * Importante:
+ * No se usa sleep(). La duracion aumenta porque el worker hace mas trabajo
+ * real de procesamiento sobre los pixeles.
  */
 
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
 #include "worker_processing.h"
+
+#define DEFAULT_HEAVY_PASSES 4u
+#define MAX_HEAVY_PASSES 100u
+#define SOBEL_THRESHOLD 90u
 
 int is_active_pixel(uint8_t pixel) {
     return pixel < PIXEL_THRESHOLD;
 }
 
+uint32_t geoboard_get_processing_passes(void) {
+    const char *env_value = getenv("GEOBOARD_HEAVY_PASSES");
+    char *end_ptr = NULL;
+    unsigned long parsed;
+
+    if (env_value == NULL || env_value[0] == '\0') {
+        return DEFAULT_HEAVY_PASSES;
+    }
+
+    parsed = strtoul(env_value, &end_ptr, 10);
+
+    if (end_ptr == env_value || *end_ptr != '\0') {
+        return DEFAULT_HEAVY_PASSES;
+    }
+
+    if (parsed > MAX_HEAVY_PASSES) {
+        parsed = MAX_HEAVY_PASSES;
+    }
+
+    return (uint32_t)parsed;
+}
+
 /*
- * Un pixel activo se considera borde si:
- * - esta en el borde de su region, o
- * - tiene al menos un vecino directo no activo.
+ * Valor absoluto entero pequeño, para evitar depender de math.h.
+ */
+static uint32_t abs_i32(int32_t value) {
+    return (value < 0) ? (uint32_t)(-value) : (uint32_t)value;
+}
+
+/*
+ * Carga pesada real:
+ *
+ * Para cada region se ejecutan varias pasadas. En cada pasada:
+ * 1. Filtro de suavizado 3x3.
+ * 2. Deteccion de bordes tipo Sobel sobre la imagen suavizada.
+ * 3. Se acumula un conteo de bordes.
+ *
+ * Esto hace que una imagen grande tenga trabajo proporcional a:
+ *
+ *   ancho * alto * cantidad_de_pasadas
+ *
+ * Por eso se justifica distribuir la imagen entre varios workers.
+ */
+static uint64_t run_heavy_filter_pipeline(const uint8_t *region_pixels,
+                                          uint32_t width,
+                                          uint32_t height,
+                                          uint32_t passes) {
+    uint64_t total_pixels = (uint64_t)width * (uint64_t)height;
+    uint8_t *work = NULL;
+    uint8_t *tmp = NULL;
+    uint64_t accumulated_edges = 0;
+    uint32_t pass;
+
+    /*
+     * Regiones muy pequenas no tienen vecinos suficientes para un filtro 3x3.
+     */
+    if (region_pixels == NULL || width < 3u || height < 3u || passes == 0u) {
+        return 0;
+    }
+
+    work = (uint8_t *)malloc((size_t)total_pixels);
+    tmp = (uint8_t *)malloc((size_t)total_pixels);
+
+    if (work == NULL || tmp == NULL) {
+        free(work);
+        free(tmp);
+
+        /*
+         * Si no hay memoria para la carga pesada, no se cae el programa.
+         * Solo se omite esta parte y se mantiene el procesamiento base.
+         */
+        return 0;
+    }
+
+    memcpy(work, region_pixels, (size_t)total_pixels);
+
+    for (pass = 0; pass < passes; pass++) {
+        uint32_t x;
+        uint32_t y;
+
+        /*
+         * Mantener bordes sin modificar para evitar lecturas fuera de rango.
+         */
+        memcpy(tmp, work, (size_t)total_pixels);
+
+        /*
+         * Suavizado 3x3.
+         */
+        for (y = 1; y + 1 < height; y++) {
+            for (x = 1; x + 1 < width; x++) {
+                uint32_t i = (y * width) + x;
+
+                uint32_t sum =
+                    work[((y - 1u) * width) + (x - 1u)] +
+                    work[((y - 1u) * width) + x] +
+                    work[((y - 1u) * width) + (x + 1u)] +
+                    work[(y * width) + (x - 1u)] +
+                    work[(y * width) + x] +
+                    work[(y * width) + (x + 1u)] +
+                    work[((y + 1u) * width) + (x - 1u)] +
+                    work[((y + 1u) * width) + x] +
+                    work[((y + 1u) * width) + (x + 1u)];
+
+                tmp[i] = (uint8_t)(sum / 9u);
+            }
+        }
+
+        /*
+         * Sobel aproximado sobre tmp.
+         */
+        for (y = 1; y + 1 < height; y++) {
+            for (x = 1; x + 1 < width; x++) {
+                int32_t gx =
+                    -(int32_t)tmp[((y - 1u) * width) + (x - 1u)] +
+                     (int32_t)tmp[((y - 1u) * width) + (x + 1u)] -
+                    2 * (int32_t)tmp[(y * width) + (x - 1u)] +
+                    2 * (int32_t)tmp[(y * width) + (x + 1u)] -
+                    (int32_t)tmp[((y + 1u) * width) + (x - 1u)] +
+                    (int32_t)tmp[((y + 1u) * width) + (x + 1u)];
+
+                int32_t gy =
+                    -(int32_t)tmp[((y - 1u) * width) + (x - 1u)] -
+                    2 * (int32_t)tmp[((y - 1u) * width) + x] -
+                    (int32_t)tmp[((y - 1u) * width) + (x + 1u)] +
+                    (int32_t)tmp[((y + 1u) * width) + (x - 1u)] +
+                    2 * (int32_t)tmp[((y + 1u) * width) + x] +
+                    (int32_t)tmp[((y + 1u) * width) + (x + 1u)];
+
+                uint32_t magnitude = abs_i32(gx) + abs_i32(gy);
+
+                if (magnitude > SOBEL_THRESHOLD) {
+                    accumulated_edges++;
+                }
+            }
+        }
+
+        /*
+         * La salida suavizada de esta pasada se usa como entrada de la siguiente.
+         */
+        {
+            uint8_t *swap = work;
+            work = tmp;
+            tmp = swap;
+        }
+    }
+
+    free(work);
+    free(tmp);
+
+    return accumulated_edges;
+}
+
+/*
+ * Deteccion de borde simple usada por el procesamiento base.
+ * Se mantiene porque es barata y ayuda con imagenes pequenas.
  */
 static int is_edge_pixel_in_region(const uint8_t *region_pixels,
                                    uint32_t width,
@@ -54,6 +222,7 @@ void process_worker_regions(const WorkerTaskHeader *header,
                             WorkerResult *result) {
     uint32_t region_index;
     uint32_t payload_offset = 0;
+    uint32_t heavy_passes = geoboard_get_processing_passes();
 
     memset(result, 0, sizeof(*result));
 
@@ -71,6 +240,19 @@ void process_worker_regions(const WorkerTaskHeader *header,
         uint32_t x;
         uint32_t y;
 
+        /*
+         * Carga pesada por region.
+         * Esta cuenta se suma a edge_pixels para que el trabajo no sea
+         * descartado por el compilador y para tener una metrica visible.
+         */
+        result->edge_pixels += run_heavy_filter_pipeline(region_pixels,
+                                                         region->width,
+                                                         region->height,
+                                                         heavy_passes);
+
+        /*
+         * Procesamiento base: conteo de pixeles activos, bbox y mascara 8x8.
+         */
         for (y = 0; y < region->height; y++) {
             for (x = 0; x < region->width; x++) {
                 uint8_t pixel = region_pixels[(y * region->width) + x];
@@ -79,11 +261,6 @@ void process_worker_regions(const WorkerTaskHeader *header,
                     uint32_t global_x = region->start_x + x;
                     uint32_t global_y = region->start_y + y;
 
-                    /*
-                     * Reduccion a matriz 8x8.
-                     * Se mapea la coordenada global de la imagen a una celda
-                     * de la mascara final.
-                     */
                     uint32_t mask_x = (global_x * 8u) / header->image_width;
                     uint32_t mask_y = (global_y * 8u) / header->image_height;
 

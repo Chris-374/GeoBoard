@@ -98,19 +98,34 @@ int worker_main(int rank) {
                        header.counter);
     }
 
-    printf("[WORKER %d] Procesando regiones %u, %u, %u...\n",
-           rank,
-           header.regions[0].region_id,
-           header.regions[1].region_id,
-           header.regions[2].region_id);
-
     {
-        uint8_t dummy_payload = 0;
-        const uint8_t *processing_payload = (payload != NULL)
-            ? payload
-            : &dummy_payload;
+        uint32_t heavy_passes = geoboard_get_processing_passes();
+        double t0;
+        double t1;
 
-        process_worker_regions(&header, processing_payload, &result);
+        printf("[WORKER %d] Procesando regiones %u, %u, %u con GEOBOARD_HEAVY_PASSES=%u...\n",
+               rank,
+               header.regions[0].region_id,
+               header.regions[1].region_id,
+               header.regions[2].region_id,
+               heavy_passes);
+
+        t0 = MPI_Wtime();
+
+        {
+            uint8_t dummy_payload = 0;
+            const uint8_t *processing_payload = (payload != NULL)
+                ? payload
+                : &dummy_payload;
+
+            process_worker_regions(&header, processing_payload, &result);
+        }
+
+        t1 = MPI_Wtime();
+
+        printf("[WORKER %d] Tiempo de procesamiento local: %.3f s\n",
+               rank,
+               t1 - t0);
     }
 
     MPI_Send(&result,
@@ -120,7 +135,7 @@ int worker_main(int rank) {
              TAG_WORKER_RESULT,
              MPI_COMM_WORLD);
 
-    printf("[WORKER %d] Resultado enviado. active=%llu edges=%llu\n",
+    printf("[WORKER %d] Resultado enviado. active=%llu edge_metric=%llu\n",
            rank,
            (unsigned long long)result.active_pixels,
            (unsigned long long)result.edge_pixels);

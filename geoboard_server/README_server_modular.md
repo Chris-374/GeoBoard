@@ -211,3 +211,46 @@ y1 = alto * (fila + 1) / 3
 Tampoco es obligatorio que la imagen ya sea 8x8. La máscara 8x8 se genera después, mapeando cada pixel activo a una celda de la matriz final.
 
 Para imágenes extremadamente pequeñas, como 1x1 o 2x2, algunas regiones pueden quedar vacías. Esta versión lo permite: el worker que reciba una región vacía devuelve una máscara parcial vacía sin fallar.
+
+
+## Modo de carga pesada para justificar la distribución
+
+Esta versión agrega procesamiento real extra en cada worker:
+
+```text
+filtrado 3x3
+detección de bordes tipo Sobel
+múltiples pasadas configurables
+```
+
+No se usa `sleep()`. El tiempo aumenta porque cada worker procesa más operaciones por pixel.
+
+La cantidad de pasadas se controla con:
+
+```bash
+export GEOBOARD_HEAVY_PASSES=8
+```
+
+Valores sugeridos:
+
+```text
+4   prueba normal
+8   demo más pesada
+12  demo bastante pesada
+20  demo muy pesada
+```
+
+Ejemplo:
+
+```bash
+export GEOBOARD_HEAVY_PASSES=12
+time mpirun --oversubscribe -np 1 ./geoboard_client images/heavy_10000.pgm : -np 4 ./geoboard_server_cluster
+```
+
+Cada worker imprime su tiempo local de procesamiento:
+
+```text
+[WORKER 2] Tiempo de procesamiento local: X.XXX s
+```
+
+Esto ayuda a defender que los workers sí están recibiendo carga de procesamiento y no solo datos pequeños.
