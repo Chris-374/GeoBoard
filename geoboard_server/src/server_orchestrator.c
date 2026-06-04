@@ -195,7 +195,7 @@ static int send_worker_task(int worker_rank,
         }
     }
 
-    printf("[SERVIDOR] Enviadas regiones %u, %u, %u cifradas al worker rank %d.\n
+    printf("[SERVIDOR] Enviadas regiones %u, %u, %u cifradas al worker rank %d.\n",
            header.regions[0].region_id,
            header.regions[1].region_id,
            header.regions[2].region_id,
