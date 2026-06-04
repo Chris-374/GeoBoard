@@ -95,16 +95,25 @@ static int build_worker_payload(const PgmImage *image,
         total_size += region->width * region->height;
     }
 
+    /*
+     * Para aceptar imagenes de cualquier tamano, incluso imagenes muy pequenas
+     * como 1x1 o 2x2, se permiten regiones vacias.
+     *
+     * Ejemplo:
+     * - una imagen 1x1 no puede llenar 9 regiones reales;
+     * - algunos workers recibiran payload_size = 0;
+     * - esos workers devuelven una mascara vacia sin fallar.
+     */
     if (total_size == 0) {
-        return -1;
-    }
-
-    payload = (uint8_t *)malloc(total_size);
-    if (payload == NULL) {
-        fprintf(stderr,
-                "[SERVIDOR] No hay memoria para payload worker %u.\n",
-                worker_index);
-        return -1;
+        payload = NULL;
+    } else {
+        payload = (uint8_t *)malloc(total_size);
+        if (payload == NULL) {
+            fprintf(stderr,
+                    "[SERVIDOR] No hay memoria para payload worker %u.\n",
+                    worker_index);
+            return -1;
+        }
     }
 
     /*
@@ -119,9 +128,11 @@ static int build_worker_payload(const PgmImage *image,
             uint32_t source_index = (global_y * image->width) + region->start_x;
             uint32_t copy_size = region->width;
 
-            memcpy(payload + payload_offset,
-                   image->pixels + source_index,
-                   copy_size);
+            if (copy_size > 0 && payload != NULL) {
+                memcpy(payload + payload_offset,
+                       image->pixels + source_index,
+                       copy_size);
+            }
 
             payload_offset += copy_size;
         }
@@ -145,11 +156,13 @@ static int send_worker_task(int worker_rank,
     /*
      * Todo lo que viaja del servidor al worker tambien va cifrado.
      */
-    chacha20_apply(payload,
-                   header.payload_size,
-                   GEOBOARD_CHACHA20_KEY,
-                   header.nonce,
-                   header.counter);
+    if (header.payload_size > 0 && payload != NULL) {
+        chacha20_apply(payload,
+                       header.payload_size,
+                       GEOBOARD_CHACHA20_KEY,
+                       header.nonce,
+                       header.counter);
+    }
 
     if (MPI_Send(&header,
                  (int)sizeof(header),
@@ -161,17 +174,28 @@ static int send_worker_task(int worker_rank,
         return -1;
     }
 
-    if (MPI_Send(payload,
-                 (int)header.payload_size,
-                 MPI_BYTE,
-                 worker_rank,
-                 TAG_WORKER_PAYLOAD,
-                 MPI_COMM_WORLD) != MPI_SUCCESS) {
-        free(payload);
-        return -1;
+    /*
+     * MPI permite count = 0. Aun asi, se usa un byte dummy para evitar
+     * depender de aritmetica con punteros NULL en implementaciones estrictas.
+     */
+    {
+        uint8_t dummy_payload = 0;
+        void *send_buffer = (header.payload_size > 0 && payload != NULL)
+            ? (void *)payload
+            : (void *)&dummy_payload;
+
+        if (MPI_Send(send_buffer,
+                     (int)header.payload_size,
+                     MPI_BYTE,
+                     worker_rank,
+                     TAG_WORKER_PAYLOAD,
+                     MPI_COMM_WORLD) != MPI_SUCCESS) {
+            free(payload);
+            return -1;
+        }
     }
 
-    printf("[SERVIDOR] Enviadas regiones %u, %u, %u cifradas al worker rank %d.\n",
+    printf("[SERVIDOR] Enviadas regiones %u, %u, %u cifradas al worker rank %d.\n
            header.regions[0].region_id,
            header.regions[1].region_id,
            header.regions[2].region_id,
@@ -497,6 +521,7 @@ int server_main(int world_size) {
            image.width,
            image.height,
            image.max_value);
+    printf("[SERVIDOR] La imagen puede tener cualquier resolucion positiva; se divide proporcionalmente en 3x3 y se reduce a 8x8.\n");
 
     /*
      * Se envian 3 tareas:

@@ -179,3 +179,35 @@ Worker rank 4 -> regiones 7, 8, 9
 ## Nota importante
 
 La siguiente integración pendiente es conectar la máscara final 8x8 con `libgeoboard.a`, y luego con el driver del kernel que controlará GPIO.
+
+
+## Soporte para imágenes de cualquier tamaño
+
+El cliente puede recibir una imagen PGM de cualquier resolución positiva. El cliente no necesita saber el ancho ni el alto, porque solo lee el archivo como bytes, lo cifra y lo envía.
+
+La adaptación ocurre en el servidor:
+
+```text
+imagen original de cualquier resolución
+        ↓
+lectura PGM P2/P5
+        ↓
+división proporcional en malla 3x3
+        ↓
+asignación de 3 regiones por worker
+        ↓
+reducción proporcional a máscara 8x8
+```
+
+No es obligatorio que el ancho o el alto sean múltiplos de 3. El servidor calcula los límites de cada región con división proporcional:
+
+```text
+x0 = ancho * columna / 3
+x1 = ancho * (columna + 1) / 3
+y0 = alto * fila / 3
+y1 = alto * (fila + 1) / 3
+```
+
+Tampoco es obligatorio que la imagen ya sea 8x8. La máscara 8x8 se genera después, mapeando cada pixel activo a una celda de la matriz final.
+
+Para imágenes extremadamente pequeñas, como 1x1 o 2x2, algunas regiones pueden quedar vacías. Esta versión lo permite: el worker que reciba una región vacía devuelve una máscara parcial vacía sin fallar.

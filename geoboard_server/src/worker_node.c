@@ -51,34 +51,52 @@ int worker_main(int rank) {
         return EXIT_FAILURE;
     }
 
-    if (header.region_count != 3u || header.payload_size == 0u) {
+    if (header.region_count != 3u) {
         fprintf(stderr, "[WORKER %d] Tarea invalida.\n", rank);
         return EXIT_FAILURE;
     }
 
-    payload = (uint8_t *)malloc(header.payload_size);
-    if (payload == NULL) {
-        fprintf(stderr, "[WORKER %d] No hay memoria para payload.\n", rank);
-        return EXIT_FAILURE;
+    /*
+     * Para soportar imagenes de cualquier tamano, se permite payload_size = 0.
+     * Esto puede pasar con imagenes muy pequenas, donde una fila de la malla 3x3
+     * queda vacia. El worker simplemente devolvera una mascara vacia.
+     */
+    if (header.payload_size > 0u) {
+        payload = (uint8_t *)malloc(header.payload_size);
+        if (payload == NULL) {
+            fprintf(stderr, "[WORKER %d] No hay memoria para payload.\n", rank);
+            return EXIT_FAILURE;
+        }
+    } else {
+        payload = NULL;
     }
 
-    MPI_Recv(payload,
-             (int)header.payload_size,
-             MPI_BYTE,
-             GEOBOARD_SERVER_RANK,
-             TAG_WORKER_PAYLOAD,
-             MPI_COMM_WORLD,
-             MPI_STATUS_IGNORE);
+    {
+        uint8_t dummy_payload = 0;
+        void *recv_buffer = (header.payload_size > 0u && payload != NULL)
+            ? (void *)payload
+            : (void *)&dummy_payload;
+
+        MPI_Recv(recv_buffer,
+                 (int)header.payload_size,
+                 MPI_BYTE,
+                 GEOBOARD_SERVER_RANK,
+                 TAG_WORKER_PAYLOAD,
+                 MPI_COMM_WORLD,
+                 MPI_STATUS_IGNORE);
+    }
 
     /*
      * El payload recibido viene cifrado.
      * ChaCha20 es simetrico, asi que aplicar chacha20_apply() descifra.
      */
-    chacha20_apply(payload,
-                   header.payload_size,
-                   GEOBOARD_CHACHA20_KEY,
-                   header.nonce,
-                   header.counter);
+    if (header.payload_size > 0u && payload != NULL) {
+        chacha20_apply(payload,
+                       header.payload_size,
+                       GEOBOARD_CHACHA20_KEY,
+                       header.nonce,
+                       header.counter);
+    }
 
     printf("[WORKER %d] Procesando regiones %u, %u, %u...\n",
            rank,
@@ -86,7 +104,14 @@ int worker_main(int rank) {
            header.regions[1].region_id,
            header.regions[2].region_id);
 
-    process_worker_regions(&header, payload, &result);
+    {
+        uint8_t dummy_payload = 0;
+        const uint8_t *processing_payload = (payload != NULL)
+            ? payload
+            : &dummy_payload;
+
+        process_worker_regions(&header, processing_payload, &result);
+    }
 
     MPI_Send(&result,
              (int)sizeof(result),
