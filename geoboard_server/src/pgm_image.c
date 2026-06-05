@@ -111,6 +111,92 @@ static uint8_t normalize_sample(uint32_t sample,
     return (uint8_t)normalized;
 }
 
+
+int parse_pgm_metadata(const uint8_t *data,
+                       uint64_t size,
+                       PgmMetadata *metadata) {
+    char token[64];
+    uint64_t pos = 0;
+    uint64_t total_pixels = 0;
+
+    if (data == NULL || metadata == NULL || size == 0) {
+        return -1;
+    }
+
+    memset(metadata, 0, sizeof(*metadata));
+
+    if (pgm_next_token(data, size, &pos, token, sizeof(token)) != 0) {
+        fprintf(stderr, "[SERVIDOR] No se pudo leer magic del PGM.\n");
+        return -1;
+    }
+
+    if (strcmp(token, "P5") == 0) {
+        metadata->is_binary_p5 = 1;
+    } else if (strcmp(token, "P2") == 0) {
+        metadata->is_binary_p5 = 0;
+        fprintf(stderr,
+                "[SERVIDOR] Para distribuir franjas cifradas se requiere PGM P5 binario.\n");
+        return -1;
+    } else {
+        fprintf(stderr,
+                "[SERVIDOR] Formato no soportado. Use PGM P5. Magic recibido: %s\n",
+                token);
+        return -1;
+    }
+
+    if (pgm_next_token(data, size, &pos, token, sizeof(token)) != 0) {
+        fprintf(stderr, "[SERVIDOR] No se pudo leer ancho del PGM.\n");
+        return -1;
+    }
+    metadata->width = (uint32_t)strtoul(token, NULL, 10);
+
+    if (pgm_next_token(data, size, &pos, token, sizeof(token)) != 0) {
+        fprintf(stderr, "[SERVIDOR] No se pudo leer alto del PGM.\n");
+        return -1;
+    }
+    metadata->height = (uint32_t)strtoul(token, NULL, 10);
+
+    if (pgm_next_token(data, size, &pos, token, sizeof(token)) != 0) {
+        fprintf(stderr, "[SERVIDOR] No se pudo leer max_value del PGM.\n");
+        return -1;
+    }
+    metadata->max_value = (uint32_t)strtoul(token, NULL, 10);
+
+    if (metadata->width == 0 || metadata->height == 0 || metadata->max_value == 0) {
+        fprintf(stderr, "[SERVIDOR] Header PGM invalido.\n");
+        return -1;
+    }
+
+    if (metadata->max_value > 255u) {
+        fprintf(stderr, "[SERVIDOR] Este prototipo solo soporta PGM P5 con max_value <= 255.\n");
+        return -1;
+    }
+
+    /*
+     * En PGM P5, despues de max_value viene al menos un espacio/salto de linea
+     * antes de los bytes de pixeles. Para los PGM generados por el proyecto,
+     * este metodo ubica correctamente el inicio de los pixeles.
+     */
+    if (pgm_skip_whitespace_and_comments(data, size, &pos) != 0) {
+        fprintf(stderr, "[SERVIDOR] PGM P5 sin datos de pixeles.\n");
+        return -1;
+    }
+
+    total_pixels = (uint64_t)metadata->width * (uint64_t)metadata->height;
+
+    if (size - pos < total_pixels) {
+        fprintf(stderr,
+                "[SERVIDOR] PGM P5 incompleto. Esperados %llu bytes de pixeles.\n",
+                (unsigned long long)total_pixels);
+        return -1;
+    }
+
+    metadata->pixel_data_offset = pos;
+    metadata->pixel_data_size = total_pixels;
+
+    return 0;
+}
+
 int parse_pgm_image(const uint8_t *data,
                     uint64_t size,
                     PgmImage *image) {

@@ -100,11 +100,13 @@ typedef struct {
 
 /*
  * Header que el servidor envia a cada worker.
- * El payload real viaja en otro MPI_Send y contiene los pixeles de las regiones.
  *
- * Nota:
- * Para simplificar el prototipo, se envia esta estructura como MPI_BYTE.
- * En una defensa se puede explicar que se asume ambiente homogeneo de Linux.
+ * Cambio importante:
+ * - El payload que viaja servidor -> worker ahora es una franja CIFRADA
+ *   del archivo original recibido desde el cliente.
+ * - El servidor NO descifra todos los pixeles para armar regiones.
+ * - El worker usa payload_file_offset para descifrar su franja en la posicion
+ *   correcta del flujo ChaCha20 original.
  */
 typedef struct {
     uint32_t magic;
@@ -116,6 +118,14 @@ typedef struct {
     uint32_t payload_size;
     uint32_t counter;
     uint8_t nonce[CHACHA20_NONCE_SIZE];
+
+    /* Offset absoluto del payload dentro del archivo cifrado original. */
+    uint64_t payload_file_offset;
+
+    /* El payload cifrado corresponde a una franja completa de filas. */
+    uint32_t stripe_start_y;
+    uint32_t stripe_height;
+
     RegionInfo regions[3];
 } WorkerTaskHeader;
 

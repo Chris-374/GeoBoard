@@ -3,17 +3,18 @@
  *
  * Servidor principal del GeoBoard.
  *
- * Responsabilidades:
- * - Recibir imagen cifrada desde el cliente rank 0.
- * - Guardar el archivo cifrado y el descifrado.
- * - Interpretar PGM P2/P5.
- * - Dividir la imagen en 9 regiones.
- * - Asignar 3 regiones a cada worker.
- * - Cifrar los paquetes enviados a cada worker.
- * - Consolidar resultados parciales.
- * - Generar la mascara final 8x8.
+ * Cambio importante de esta version:
+ * - El servidor recibe la imagen CIFRADA desde el cliente.
+ * - El servidor guarda el archivo cifrado.
+ * - El servidor descifra SOLO el header PGM necesario para conocer ancho,
+ *   alto y offset donde empiezan los pixeles.
+ * - El servidor NO descifra todos los pixeles.
+ * - El servidor divide la imagen en 3 franjas horizontales CIFRADAS.
+ * - Cada worker recibe su franja cifrada y la descifra localmente.
  *
- * Este archivo NO usa sockets. Todo se comunica por OpenMPI.
+ * Esto calza mejor con el enunciado: la informacion que viaja por red entre
+ * servidor y workers sigue cifrada, y los nodos de procesamiento son quienes
+ * descifran su parte.
  */
 
 #include <mpi.h>
@@ -28,167 +29,187 @@
 #include "pgm_image.h"
 #include "server_orchestrator.h"
 
-/*
- * Calcula el inicio de una columna de la division 3x3.
- * Se usa division proporcional, por eso la imagen no tiene que ser multiplo de 3.
- */
+#define HEADER_DECRYPT_INITIAL_SIZE 4096u
+#define HEADER_DECRYPT_MAX_SIZE     1048576u
+
 static uint32_t region_x0(uint32_t width, uint32_t col) {
     return (width * col) / 3u;
 }
 
-/*
- * Calcula el final de una columna de la division 3x3.
- */
 static uint32_t region_x1(uint32_t width, uint32_t col) {
     return (width * (col + 1u)) / 3u;
 }
 
-/*
- * Calcula el inicio de una fila de la division 3x3.
- */
 static uint32_t region_y0(uint32_t height, uint32_t row) {
     return (height * row) / 3u;
 }
 
-/*
- * Calcula el final de una fila de la division 3x3.
- */
 static uint32_t region_y1(uint32_t height, uint32_t row) {
     return (height * (row + 1u)) / 3u;
 }
 
 /*
- * Construye el payload para un worker.
- *
- * worker_index 0 -> fila superior: regiones 1, 2, 3
- * worker_index 1 -> fila central:  regiones 4, 5, 6
- * worker_index 2 -> fila inferior:  regiones 7, 8, 9
- *
- * El payload contiene los pixeles de las 3 regiones concatenados.
+ * Descifra solo un prefijo pequeno del archivo para leer el header PGM.
+ * No se descifran los pixeles completos en el servidor.
  */
-static int build_worker_payload(const PgmImage *image,
-                                uint32_t worker_index,
-                                WorkerTaskHeader *header,
-                                uint8_t **out_payload) {
+static int parse_encrypted_pgm_metadata(const uint8_t *encrypted_data,
+                                        uint64_t file_size,
+                                        uint32_t counter,
+                                        const uint8_t nonce[CHACHA20_NONCE_SIZE],
+                                        PgmMetadata *metadata) {
+    uint64_t attempt_size = HEADER_DECRYPT_INITIAL_SIZE;
+
+    if (encrypted_data == NULL || metadata == NULL || file_size == 0) {
+        return -1;
+    }
+
+    while (attempt_size <= HEADER_DECRYPT_MAX_SIZE && attempt_size <= file_size) {
+        uint8_t *header_copy = (uint8_t *)malloc((size_t)attempt_size);
+
+        if (header_copy == NULL) {
+            fprintf(stderr, "[SERVIDOR] No hay memoria para descifrar header PGM.\n");
+            return -1;
+        }
+
+        memcpy(header_copy, encrypted_data, (size_t)attempt_size);
+
+        chacha20_apply(header_copy,
+                       attempt_size,
+                       GEOBOARD_CHACHA20_KEY,
+                       nonce,
+                       counter);
+
+        if (parse_pgm_metadata(header_copy, attempt_size, metadata) == 0) {
+            free(header_copy);
+
+            if (metadata->pixel_data_offset + metadata->pixel_data_size > file_size) {
+                fprintf(stderr, "[SERVIDOR] Metadata PGM inconsistente con tamano de archivo.\n");
+                return -1;
+            }
+
+            return 0;
+        }
+
+        free(header_copy);
+        attempt_size *= 2u;
+    }
+
+    fprintf(stderr,
+            "[SERVIDOR] No se pudo leer metadata PGM. Use PGM P5 binario con header pequeno.\n");
+    return -1;
+}
+
+/*
+ * Construye el header y payload cifrado para un worker.
+ *
+ * En vez de mandar pixeles descifrados, se copia una franja CIFRADA directamente
+ * desde el archivo cifrado recibido del cliente.
+ */
+static int build_worker_payload_from_encrypted(const uint8_t *encrypted_data,
+                                               uint64_t file_size,
+                                               const PgmMetadata *metadata,
+                                               uint32_t worker_index,
+                                               uint32_t client_counter,
+                                               const uint8_t client_nonce[CHACHA20_NONCE_SIZE],
+                                               WorkerTaskHeader *header,
+                                               uint8_t **out_payload) {
     uint32_t row = worker_index;
     uint32_t col;
-    uint32_t total_size = 0;
-    uint32_t payload_offset = 0;
+    uint32_t y0;
+    uint32_t y1;
+    uint32_t stripe_height;
+    uint64_t payload_file_offset;
+    uint64_t payload_size64;
     uint8_t *payload = NULL;
 
-    if (image == NULL || header == NULL || out_payload == NULL ||
-        image->pixels == NULL) {
+    if (encrypted_data == NULL || metadata == NULL || header == NULL || out_payload == NULL) {
         return -1;
     }
 
     memset(header, 0, sizeof(*header));
 
+    y0 = region_y0(metadata->height, row);
+    y1 = region_y1(metadata->height, row);
+    stripe_height = y1 - y0;
+
+    payload_file_offset = metadata->pixel_data_offset + ((uint64_t)y0 * metadata->width);
+    payload_size64 = (uint64_t)metadata->width * stripe_height;
+
+    if (payload_size64 > UINT32_MAX) {
+        fprintf(stderr, "[SERVIDOR] Payload demasiado grande para el header actual.\n");
+        return -1;
+    }
+
+    if (payload_file_offset + payload_size64 > file_size) {
+        fprintf(stderr, "[SERVIDOR] Rango cifrado del worker fuera del archivo.\n");
+        return -1;
+    }
+
     header->magic = WORKER_TASK_MAGIC;
     header->version = GEOBOARD_VERSION;
     header->worker_index = worker_index;
-    header->image_width = image->width;
-    header->image_height = image->height;
+    header->image_width = metadata->width;
+    header->image_height = metadata->height;
     header->region_count = 3u;
+    header->payload_size = (uint32_t)payload_size64;
 
     /*
-     * Counter y nonce para cifrar la comunicacion servidor -> worker.
+     * Se reutiliza el counter y nonce originales del cliente, porque el payload
+     * es una parte del ciphertext original de la imagen completa.
      */
-    header->counter = 1u + worker_index;
-    build_worker_nonce(worker_index, header->nonce);
+    header->counter = client_counter;
+    memcpy(header->nonce, client_nonce, CHACHA20_NONCE_SIZE);
+    header->payload_file_offset = payload_file_offset;
+    header->stripe_start_y = y0;
+    header->stripe_height = stripe_height;
 
-    /*
-     * Se calculan las 3 regiones que le corresponden al worker.
-     */
     for (col = 0; col < 3u; col++) {
-        uint32_t x0 = region_x0(image->width, col);
-        uint32_t x1 = region_x1(image->width, col);
-        uint32_t y0 = region_y0(image->height, row);
-        uint32_t y1 = region_y1(image->height, row);
+        uint32_t x0 = region_x0(metadata->width, col);
+        uint32_t x1 = region_x1(metadata->width, col);
         RegionInfo *region = &header->regions[col];
 
         region->region_id = (row * 3u) + col + 1u;
         region->start_x = x0;
         region->start_y = y0;
         region->width = x1 - x0;
-        region->height = y1 - y0;
-
-        total_size += region->width * region->height;
+        region->height = stripe_height;
     }
 
-    /*
-     * Para aceptar imagenes de cualquier tamano, incluso imagenes pequenas
-     * como 1x1 o 2x2, se permiten regiones vacias.
-     *
-     * Si total_size = 0, el worker recibira un payload vacio y devolvera
-     * una mascara parcial vacia sin fallar.
-     */
-    if (total_size == 0) {
-        payload = NULL;
-    } else {
-        payload = (uint8_t *)malloc(total_size);
+    if (payload_size64 > 0) {
+        payload = (uint8_t *)malloc((size_t)payload_size64);
         if (payload == NULL) {
-            fprintf(stderr,
-                    "[SERVIDOR] No hay memoria para payload worker %u.\n",
-                    worker_index);
+            fprintf(stderr, "[SERVIDOR] No hay memoria para payload cifrado worker %u.\n", worker_index);
             return -1;
         }
+
+        memcpy(payload,
+               encrypted_data + payload_file_offset,
+               (size_t)payload_size64);
     }
 
-    /*
-     * Copia los pixeles de las 3 regiones del worker en un bloque lineal.
-     */
-    for (col = 0; col < 3u; col++) {
-        RegionInfo *region = &header->regions[col];
-        uint32_t y;
-
-        for (y = 0; y < region->height; y++) {
-            uint32_t global_y = region->start_y + y;
-            uint32_t source_index = (global_y * image->width) + region->start_x;
-            uint32_t copy_size = region->width;
-
-            if (copy_size > 0 && payload != NULL) {
-                memcpy(payload + payload_offset,
-                       image->pixels + source_index,
-                       copy_size);
-            }
-
-            payload_offset += copy_size;
-        }
-    }
-
-    header->payload_size = total_size;
     *out_payload = payload;
-
     return 0;
 }
 
-/*
- * Envia una tarea a un worker.
- *
- * Se manda:
- * 1. Header con informacion de regiones.
- * 2. Payload cifrado con los pixeles de esas regiones.
- */
 static int send_worker_task(int worker_rank,
-                            const PgmImage *image,
-                            uint32_t worker_index) {
+                            const uint8_t *encrypted_data,
+                            uint64_t file_size,
+                            const PgmMetadata *metadata,
+                            uint32_t worker_index,
+                            uint32_t client_counter,
+                            const uint8_t client_nonce[CHACHA20_NONCE_SIZE]) {
     WorkerTaskHeader header;
     uint8_t *payload = NULL;
 
-    if (build_worker_payload(image, worker_index, &header, &payload) != 0) {
+    if (build_worker_payload_from_encrypted(encrypted_data,
+                                            file_size,
+                                            metadata,
+                                            worker_index,
+                                            client_counter,
+                                            client_nonce,
+                                            &header,
+                                            &payload) != 0) {
         return -1;
-    }
-
-    /*
-     * Todo lo que viaja del servidor al worker tambien va cifrado.
-     * Si el payload esta vacio, no hay nada que cifrar.
-     */
-    if (header.payload_size > 0 && payload != NULL) {
-        chacha20_apply(payload,
-                       header.payload_size,
-                       GEOBOARD_CHACHA20_KEY,
-                       header.nonce,
-                       header.counter);
     }
 
     if (MPI_Send(&header,
@@ -201,10 +222,6 @@ static int send_worker_task(int worker_rank,
         return -1;
     }
 
-    /*
-     * MPI permite count = 0.
-     * Aun asi, se usa un byte dummy para evitar problemas con punteros NULL.
-     */
     {
         uint8_t dummy_payload = 0;
         void *send_buffer = (header.payload_size > 0 && payload != NULL)
@@ -222,7 +239,7 @@ static int send_worker_task(int worker_rank,
         }
     }
 
-    printf("[SERVIDOR] Enviadas regiones %u, %u, %u cifradas al worker rank %d.\n",
+    printf("[SERVIDOR] Enviadas regiones %u, %u, %u al worker rank %d como franja CIFRADA original.\n",
            header.regions[0].region_id,
            header.regions[1].region_id,
            header.regions[2].region_id,
@@ -232,10 +249,6 @@ static int send_worker_task(int worker_rank,
     return 0;
 }
 
-/*
- * Envia orden de apagado a los workers.
- * Se usa si el servidor falla antes de enviarles trabajo normal.
- */
 static void send_shutdown_to_workers(void) {
     int rank;
     WorkerTaskHeader header;
@@ -255,21 +268,6 @@ static void send_shutdown_to_workers(void) {
     }
 }
 
-/*
- * Recibe el archivo cifrado desde el cliente rank 0.
- *
- * El cliente envia:
- * - magic
- * - version
- * - file_size
- * - filename_len
- * - counter
- * - chunk_size
- * - nonce
- * - filename
- * - chunks del archivo cifrado
- * - marcador de fin
- */
 static int receive_client_file(uint8_t **out_encrypted_data,
                                uint64_t *out_file_size,
                                char *out_filename,
@@ -290,61 +288,13 @@ static int receive_client_file(uint8_t **out_encrypted_data,
     printf("[SERVIDOR] Esperando metadata del cliente rank %d...\n",
            GEOBOARD_CLIENT_RANK);
 
-    MPI_Recv(&magic,
-             1,
-             MPI_UINT32_T,
-             GEOBOARD_CLIENT_RANK,
-             TAG_MAGIC,
-             MPI_COMM_WORLD,
-             MPI_STATUS_IGNORE);
-
-    MPI_Recv(&version,
-             1,
-             MPI_UINT32_T,
-             GEOBOARD_CLIENT_RANK,
-             TAG_VERSION,
-             MPI_COMM_WORLD,
-             MPI_STATUS_IGNORE);
-
-    MPI_Recv(&file_size,
-             1,
-             MPI_UINT64_T,
-             GEOBOARD_CLIENT_RANK,
-             TAG_FILE_SIZE,
-             MPI_COMM_WORLD,
-             MPI_STATUS_IGNORE);
-
-    MPI_Recv(&filename_len,
-             1,
-             MPI_UINT32_T,
-             GEOBOARD_CLIENT_RANK,
-             TAG_FILENAME_LEN,
-             MPI_COMM_WORLD,
-             MPI_STATUS_IGNORE);
-
-    MPI_Recv(&counter,
-             1,
-             MPI_UINT32_T,
-             GEOBOARD_CLIENT_RANK,
-             TAG_COUNTER,
-             MPI_COMM_WORLD,
-             MPI_STATUS_IGNORE);
-
-    MPI_Recv(&chunk_size,
-             1,
-             MPI_UINT32_T,
-             GEOBOARD_CLIENT_RANK,
-             TAG_CHUNK_SIZE,
-             MPI_COMM_WORLD,
-             MPI_STATUS_IGNORE);
-
-    MPI_Recv(out_nonce,
-             CHACHA20_NONCE_SIZE,
-             MPI_BYTE,
-             GEOBOARD_CLIENT_RANK,
-             TAG_NONCE,
-             MPI_COMM_WORLD,
-             MPI_STATUS_IGNORE);
+    MPI_Recv(&magic, 1, MPI_UINT32_T, GEOBOARD_CLIENT_RANK, TAG_MAGIC, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    MPI_Recv(&version, 1, MPI_UINT32_T, GEOBOARD_CLIENT_RANK, TAG_VERSION, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    MPI_Recv(&file_size, 1, MPI_UINT64_T, GEOBOARD_CLIENT_RANK, TAG_FILE_SIZE, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    MPI_Recv(&filename_len, 1, MPI_UINT32_T, GEOBOARD_CLIENT_RANK, TAG_FILENAME_LEN, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    MPI_Recv(&counter, 1, MPI_UINT32_T, GEOBOARD_CLIENT_RANK, TAG_COUNTER, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    MPI_Recv(&chunk_size, 1, MPI_UINT32_T, GEOBOARD_CLIENT_RANK, TAG_CHUNK_SIZE, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    MPI_Recv(out_nonce, CHACHA20_NONCE_SIZE, MPI_BYTE, GEOBOARD_CLIENT_RANK, TAG_NONCE, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
     if (magic != GEOBOARD_MAGIC) {
         fprintf(stderr, "[SERVIDOR] Magic invalido recibido del cliente.\n");
@@ -384,7 +334,6 @@ static int receive_client_file(uint8_t **out_encrypted_data,
              MPI_STATUS_IGNORE);
 
     received_filename[filename_len] = '\0';
-
     sanitize_filename(received_filename, out_filename, out_filename_size);
     free(received_filename);
 
@@ -437,10 +386,6 @@ static int receive_client_file(uint8_t **out_encrypted_data,
     return 0;
 }
 
-/*
- * Clasificacion muy simple para tener una salida defendible.
- * No pretende ser vision por computadora avanzada.
- */
 static const char *classify_basic_shape(uint64_t active_pixels,
                                         int32_t bbox_min_x,
                                         int32_t bbox_min_y,
@@ -482,22 +427,17 @@ static const char *classify_basic_shape(uint64_t active_pixels,
     return "figura geometrica simple";
 }
 
-/*
- * Funcion principal del servidor rank 1.
- */
 int server_main(int world_size) {
     uint8_t *encrypted_data = NULL;
-    uint8_t *decrypted_data = NULL;
     uint64_t file_size = 0;
     uint32_t counter = 0;
     uint8_t nonce[CHACHA20_NONCE_SIZE];
 
     char filename[256];
     char encrypted_path[512];
-    char decrypted_path[512];
     char mask_path[512];
 
-    PgmImage image;
+    PgmMetadata metadata;
     uint8_t final_mask[8];
 
     uint64_t total_active = 0;
@@ -512,15 +452,14 @@ int server_main(int world_size) {
 
     double t_server_start;
     double t_receive_done;
-    double t_decrypt_done;
-    double t_parse_done;
+    double t_header_done;
     double t_distributed_start;
     double t_distributed_done;
     double t_server_end;
 
     memset(filename, 0, sizeof(filename));
     memset(nonce, 0, sizeof(nonce));
-    memset(&image, 0, sizeof(image));
+    memset(&metadata, 0, sizeof(metadata));
     memset(final_mask, 0, sizeof(final_mask));
 
     t_server_start = MPI_Wtime();
@@ -538,9 +477,6 @@ int server_main(int world_size) {
         return EXIT_FAILURE;
     }
 
-    /*
-     * 1. Recibir archivo cifrado desde el cliente.
-     */
     if (receive_client_file(&encrypted_data,
                             &file_size,
                             filename,
@@ -559,12 +495,6 @@ int server_main(int world_size) {
              OUTPUT_DIR,
              filename);
 
-    snprintf(decrypted_path,
-             sizeof(decrypted_path),
-             "%s/decrypted_%s",
-             OUTPUT_DIR,
-             filename);
-
     snprintf(mask_path,
              sizeof(mask_path),
              "%s/mask8x8_%s.txt",
@@ -572,85 +502,55 @@ int server_main(int world_size) {
              filename);
 
     write_file(encrypted_path, encrypted_data, file_size);
-
-    decrypted_data = (uint8_t *)malloc((size_t)file_size);
-    if (decrypted_data == NULL) {
-        fprintf(stderr, "[SERVIDOR] No hay memoria para descifrar imagen.\n");
-        free(encrypted_data);
-        send_shutdown_to_workers();
-        return EXIT_FAILURE;
-    }
-
-    /*
-     * 2. Descifrado de imagen recibida del cliente.
-     * La key es compartida; nonce y counter vinieron en metadata.
-     */
-    memcpy(decrypted_data, encrypted_data, (size_t)file_size);
-
-    chacha20_apply(decrypted_data,
-                   file_size,
-                   GEOBOARD_CHACHA20_KEY,
-                   nonce,
-                   counter);
-
-    t_decrypt_done = MPI_Wtime();
-
-    write_file(decrypted_path, decrypted_data, file_size);
-
     printf("[SERVIDOR] Archivo cifrado guardado en: %s\n", encrypted_path);
-    printf("[SERVIDOR] Archivo descifrado guardado en: %s\n", decrypted_path);
 
     /*
-     * 3. Interpretar imagen PGM.
+     * El servidor descifra solo el header PGM, no todos los pixeles.
      */
-    if (parse_pgm_image(decrypted_data, file_size, &image) != 0) {
+    if (parse_encrypted_pgm_metadata(encrypted_data,
+                                     file_size,
+                                     counter,
+                                     nonce,
+                                     &metadata) != 0) {
         fprintf(stderr,
-                "[SERVIDOR] No se pudo interpretar la imagen. Use PGM P2 o P5.\n");
+                "[SERVIDOR] No se pudo interpretar metadata PGM cifrada. Use PGM P5.\n");
         free(encrypted_data);
-        free(decrypted_data);
         send_shutdown_to_workers();
         return EXIT_FAILURE;
     }
 
-    t_parse_done = MPI_Wtime();
+    t_header_done = MPI_Wtime();
 
-    printf("[SERVIDOR] Imagen PGM cargada: %ux%u, max=%u\n",
-           image.width,
-           image.height,
-           image.max_value);
-
+    printf("[SERVIDOR] Metadata PGM leida desde header descifrado: %ux%u, max=%u, pixel_offset=%llu\n",
+           metadata.width,
+           metadata.height,
+           metadata.max_value,
+           (unsigned long long)metadata.pixel_data_offset);
+    printf("[SERVIDOR] El servidor NO descifra los pixeles completos; los workers descifran sus franjas.\n");
     printf("[SERVIDOR] La imagen puede tener cualquier resolucion positiva; se divide proporcionalmente en 3x3 y se reduce a 8x8.\n");
 
-    /*
-     * 4. Distribucion 3x3:
-     *
-     * - rank 2 procesa regiones 1, 2, 3
-     * - rank 3 procesa regiones 4, 5, 6
-     * - rank 4 procesa regiones 7, 8, 9
-     */
     t_distributed_start = MPI_Wtime();
 
     for (worker_index = 0; worker_index < GEOBOARD_WORKER_COUNT; worker_index++) {
         int worker_rank = GEOBOARD_FIRST_WORKER_RANK + worker_index;
 
         if (send_worker_task(worker_rank,
-                             &image,
-                             (uint32_t)worker_index) != 0) {
+                             encrypted_data,
+                             file_size,
+                             &metadata,
+                             (uint32_t)worker_index,
+                             counter,
+                             nonce) != 0) {
             fprintf(stderr,
-                    "[SERVIDOR] Error enviando tarea al worker rank %d.\n",
+                    "[SERVIDOR] Error enviando tarea cifrada al worker rank %d.\n",
                     worker_rank);
 
-            free_pgm_image(&image);
             free(encrypted_data);
-            free(decrypted_data);
             send_shutdown_to_workers();
             return EXIT_FAILURE;
         }
     }
 
-    /*
-     * 5. Recepcion y consolidacion de resultados.
-     */
     for (worker_index = 0; worker_index < GEOBOARD_WORKER_COUNT; worker_index++) {
         WorkerResult result;
         int y;
@@ -677,9 +577,6 @@ int server_main(int world_size) {
                (unsigned long long)result.active_pixels,
                (unsigned long long)result.edge_pixels);
 
-        /*
-         * Se unen las mascaras parciales usando OR bit a bit.
-         */
         for (y = 0; y < 8; y++) {
             final_mask[y] |= result.mask[y];
         }
@@ -687,9 +584,6 @@ int server_main(int world_size) {
         total_active += result.active_pixels;
         total_edges += result.edge_pixels;
 
-        /*
-         * Consolidacion del bounding box global.
-         */
         if (result.has_content) {
             if (global_min_x < 0 || result.bbox_min_x < global_min_x) {
                 global_min_x = result.bbox_min_x;
@@ -711,9 +605,6 @@ int server_main(int world_size) {
 
     t_distributed_done = MPI_Wtime();
 
-    /*
-     * 6. Guardar e imprimir resultados finales.
-     */
     print_mask(final_mask);
     save_mask_file(mask_path, final_mask);
 
@@ -739,11 +630,9 @@ int server_main(int world_size) {
     printf("[SERVIDOR] Tiempos internos:\n");
     printf("[SERVIDOR] - Recepcion cliente: %.3f s\n",
            t_receive_done - t_server_start);
-    printf("[SERVIDOR] - Descifrado servidor: %.3f s\n",
-           t_decrypt_done - t_receive_done);
-    printf("[SERVIDOR] - Parseo PGM: %.3f s\n",
-           t_parse_done - t_decrypt_done);
-    printf("[SERVIDOR] - Distribucion + procesamiento workers: %.3f s\n",
+    printf("[SERVIDOR] - Lectura header PGM cifrado: %.3f s\n",
+           t_header_done - t_receive_done);
+    printf("[SERVIDOR] - Distribucion cifrada + procesamiento workers: %.3f s\n",
            t_distributed_done - t_distributed_start);
     printf("[SERVIDOR] - Total servidor: %.3f s\n",
            t_server_end - t_server_start);
@@ -751,9 +640,6 @@ int server_main(int world_size) {
     printf("[SERVIDOR] Procesamiento distribuido terminado.\n");
     printf("[SERVIDOR] Siguiente capa pendiente: enviar mask8x8 a libgeoboard.a y luego al driver GPIO.\n");
 
-    free_pgm_image(&image);
     free(encrypted_data);
-    free(decrypted_data);
-
     return EXIT_SUCCESS;
 }

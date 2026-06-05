@@ -124,6 +124,36 @@ void chacha20_apply(uint8_t *data,
     }
 }
 
+
+void chacha20_apply_with_offset(uint8_t *data,
+                                uint64_t size,
+                                const uint8_t key[CHACHA20_KEY_SIZE],
+                                const uint8_t nonce[CHACHA20_NONCE_SIZE],
+                                uint32_t initial_counter,
+                                uint64_t byte_offset) {
+    uint8_t keystream[CHACHA20_BLOCK_SIZE];
+    uint64_t data_offset = 0;
+    uint64_t skip = byte_offset % CHACHA20_BLOCK_SIZE;
+    uint32_t counter = initial_counter + (uint32_t)(byte_offset / CHACHA20_BLOCK_SIZE);
+
+    while (data_offset < size) {
+        uint32_t i;
+        uint64_t remaining = size - data_offset;
+        uint32_t available = (uint32_t)(CHACHA20_BLOCK_SIZE - skip);
+        uint32_t block_bytes = (remaining > available) ? available : (uint32_t)remaining;
+
+        chacha20_block(key, counter, nonce, keystream);
+
+        for (i = 0; i < block_bytes; i++) {
+            data[data_offset + i] ^= keystream[skip + i];
+        }
+
+        data_offset += block_bytes;
+        counter++;
+        skip = 0;
+    }
+}
+
 /*
  * Nonce diferente para cada worker.
  * El servidor lo coloca en el header y el worker lo usa para descifrar.
