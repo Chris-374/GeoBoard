@@ -22,14 +22,14 @@ __used __section("__versions") = {
 	{ 0xc0a164ad, "i2c_smbus_write_i2c_block_data" },
 	{ 0xf0fdf6cb, "__stack_chk_fail" },
 	{ 0xefd6cf06, "__aeabi_unwind_cpp_pr0" },
+	{ 0xfe990052, "gpio_free" },
+	{ 0x92997ed8, "_printk" },
 	{ 0x5f754e5a, "memset" },
 	{ 0x8959974f, "i2c_get_adapter" },
-	{ 0x92997ed8, "_printk" },
 	{ 0xa269459d, "i2c_new_client_device" },
 	{ 0xaa66fde9, "i2c_put_adapter" },
 	{ 0x41c8c3ae, "i2c_smbus_write_byte" },
 	{ 0x403f9529, "gpio_request_one" },
-	{ 0xfe990052, "gpio_free" },
 	{ 0x472ee271, "misc_register" },
 	{ 0x9b5d507a, "i2c_unregister_device" },
 	{ 0x5535c7ef, "misc_deregister" },
@@ -39,10 +39,11 @@ __used __section("__versions") = {
 	{ 0x5ac3d8ff, "gpio_to_desc" },
 	{ 0x20dfc323, "gpiod_get_raw_value" },
 	{ 0x51a910c0, "arm_copy_to_user" },
+	{ 0x2d7d2346, "param_ops_int" },
 	{ 0xf1ce2f51, "module_layout" },
 };
 
 MODULE_INFO(depends, "");
 
 
-MODULE_INFO(srcversion, "6943CFCB11185B48C953E6D");
+MODULE_INFO(srcversion, "03E1CD934E42150FB3C06C1");

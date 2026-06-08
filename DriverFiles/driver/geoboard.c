@@ -19,12 +19,17 @@
 #define HT16K33_DIM 0xE0 /* | (0..15) -> nivel de brillo */
 
 // GPIO pins defined for the buttons
-#define GPIO_BTN_UP      17
-#define GPIO_BTN_DOWN    27
-#define GPIO_BTN_LEFT    22
-#define GPIO_BTN_RIGHT   23
-#define GPIO_BTN_SELECT  24
-#define GPIO_BTN_CHECK   25
+static int gpio_base = 512;
+module_param(gpio_base, int, 0444);
+MODULE_PARM_DESC(gpio_base, "base del gpiochip BCM (kernel 6.6+: tipicamente 512)");
+
+/* Numeros BCM de cada boton (se les suma gpio_base al usarlos) */
+#define BCM_BTN_UP      17
+#define BCM_BTN_DOWN    27
+#define BCM_BTN_LEFT    22
+#define BCM_BTN_RIGHT   23
+#define BCM_BTN_SELECT  24
+#define BCM_BTN_CHECK   25
 
 static struct i2c_adapter *geo_adapter;
 static struct i2c_client *geo_client;
@@ -102,92 +107,57 @@ static int geo_buttons_init(void)
 {
     int ret;
 
-    /*ret = gpio_request_one(GPIO_BTN_UP, GPIOF_IN, "geo_btn_up");
-    if (ret) {
-        pr_err("geoboard: fallo GPIO_BTN_UP gpio%d ret=%d\n", GPIO_BTN_UP, ret);
-        return ret;
-    }
+    ret = gpio_request_one(gpio_base + BCM_BTN_UP, GPIOF_IN, "geo_btn_up");
+    if (ret) { pr_err("geoboard: fallo UP gpio%d ret=%d\n", gpio_base + BCM_BTN_UP, ret); return ret; }
 
-    ret = gpio_request_one(GPIO_BTN_DOWN, GPIOF_IN, "geo_btn_down");
-    if (ret) {
-        pr_err("geoboard: fallo GPIO_BTN_DOWN gpio%d ret=%d\n", GPIO_BTN_DOWN, ret);
-        goto err_down;
-    }
+    ret = gpio_request_one(gpio_base + BCM_BTN_DOWN, GPIOF_IN, "geo_btn_down");
+    if (ret) { pr_err("geoboard: fallo DOWN ret=%d\n", ret); goto err_down; }
 
-    ret = gpio_request_one(GPIO_BTN_LEFT, GPIOF_IN, "geo_btn_left");
-    if (ret) {
-        pr_err("geoboard: fallo GPIO_BTN_LEFT gpio%d ret=%d\n", GPIO_BTN_LEFT, ret);
-        goto err_left;
-    }
+    ret = gpio_request_one(gpio_base + BCM_BTN_LEFT, GPIOF_IN, "geo_btn_left");
+    if (ret) { pr_err("geoboard: fallo LEFT ret=%d\n", ret); goto err_left; }
 
-    ret = gpio_request_one(GPIO_BTN_RIGHT, GPIOF_IN, "geo_btn_right");
-    if (ret) {
-        pr_err("geoboard: fallo GPIO_BTN_RIGHT gpio%d ret=%d\n", GPIO_BTN_RIGHT, ret);
-        goto err_right;
-    }*/
+    ret = gpio_request_one(gpio_base + BCM_BTN_RIGHT, GPIOF_IN, "geo_btn_right");
+    if (ret) { pr_err("geoboard: fallo RIGHT ret=%d\n", ret); goto err_right; }
 
-    ret = gpio_request_one(GPIO_BTN_SELECT, GPIOF_IN, "geo_btn_select");
-    if (ret) {
-        pr_err("geoboard: fallo GPIO_BTN_SELECT gpio%d ret=%d\n", GPIO_BTN_SELECT, ret);
-        goto err_select;
-    }
+    ret = gpio_request_one(gpio_base + BCM_BTN_SELECT, GPIOF_IN, "geo_btn_select");
+    if (ret) { pr_err("geoboard: fallo SELECT ret=%d\n", ret); goto err_select; }
 
-    /*ret = gpio_request_one(GPIO_BTN_CHECK, GPIOF_IN, "geo_btn_check");
-    if (ret) {
-        pr_err("geoboard: fallo GPIO_BTN_CHECK gpio%d ret=%d\n", GPIO_BTN_CHECK, ret);
-        goto err_check;
-    }*/
+    ret = gpio_request_one(gpio_base + BCM_BTN_CHECK, GPIOF_IN, "geo_btn_check");
+    if (ret) { pr_err("geoboard: fallo CHECK ret=%d\n", ret); goto err_check; }
 
-    pr_info("geoboard: botones inicializados correctamente\n");
+    pr_info("geoboard: botones inicializados (base=%d)\n", gpio_base);
     return 0;
 
-err_check:
-    gpio_free(GPIO_BTN_SELECT);
-err_select:
-    gpio_free(GPIO_BTN_RIGHT);
-err_right:
-    gpio_free(GPIO_BTN_LEFT);
-err_left:
-    gpio_free(GPIO_BTN_DOWN);
-err_down:
-    gpio_free(GPIO_BTN_UP);
+err_check:  gpio_free(gpio_base + BCM_BTN_SELECT);
+err_select: gpio_free(gpio_base + BCM_BTN_RIGHT);
+err_right:  gpio_free(gpio_base + BCM_BTN_LEFT);
+err_left:   gpio_free(gpio_base + BCM_BTN_DOWN);
+err_down:   gpio_free(gpio_base + BCM_BTN_UP);
     return ret;
 }
 
 static void geo_buttons_exit(void)
 {
-    /*gpio_free(GPIO_BTN_UP);
-    gpio_free(GPIO_BTN_DOWN);
-    gpio_free(GPIO_BTN_LEFT);
-    gpio_free(GPIO_BTN_RIGHT);*/
-    gpio_free(GPIO_BTN_SELECT);
-    //gpio_free(GPIO_BTN_CHECK);
-
+    gpio_free(gpio_base + BCM_BTN_UP);
+    gpio_free(gpio_base + BCM_BTN_DOWN);
+    gpio_free(gpio_base + BCM_BTN_LEFT);
+    gpio_free(gpio_base + BCM_BTN_RIGHT);
+    gpio_free(gpio_base + BCM_BTN_SELECT);
+    gpio_free(gpio_base + BCM_BTN_CHECK);
     pr_info("geoboard: botones liberados\n");
 }
 
 static int geo_read_button_state(void)
 {
-    if (!gpio_get_value(GPIO_BTN_UP))
-        return GEO_BTN_UP;
-
-    if (!gpio_get_value(GPIO_BTN_DOWN))
-        return GEO_BTN_DOWN;
-
-    if (!gpio_get_value(GPIO_BTN_LEFT))
-        return GEO_BTN_LEFT;
-
-    if (!gpio_get_value(GPIO_BTN_RIGHT))
-        return GEO_BTN_RIGHT;
-
-    if (!gpio_get_value(GPIO_BTN_SELECT))
-        return GEO_BTN_SELECT;
-
-    if (!gpio_get_value(GPIO_BTN_CHECK))
-        return GEO_BTN_CHECK;
-
+    if (!gpio_get_value(gpio_base + BCM_BTN_UP))     return GEO_BTN_UP;
+    if (!gpio_get_value(gpio_base + BCM_BTN_DOWN))   return GEO_BTN_DOWN;
+    if (!gpio_get_value(gpio_base + BCM_BTN_LEFT))   return GEO_BTN_LEFT;
+    if (!gpio_get_value(gpio_base + BCM_BTN_RIGHT))  return GEO_BTN_RIGHT;
+    if (!gpio_get_value(gpio_base + BCM_BTN_SELECT)) return GEO_BTN_SELECT;
+    if (!gpio_get_value(gpio_base + BCM_BTN_CHECK))  return GEO_BTN_CHECK;
     return GEO_BTN_NONE;
 }
+
 
 /*
 =============================================
