@@ -1,0 +1,1 @@
+savedcmd_/home/mauronav006/Documents/geoboard/driver/Module.symvers :=  scripts/mod/modpost -M -m -a      -o /home/mauronav006/Documents/geoboard/driver/Module.symvers -n -T /home/mauronav006/Documents/geoboard/driver/modules.order -i Module.symvers -e 
