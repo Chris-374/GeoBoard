@@ -1290,7 +1290,9 @@ deps_/home/mauronav006/Documents/GeoBoard/DriverFiles/driver/geoboard.o := \
   /usr/src/linux-headers-6.12.75+rpt-common-rpi/include/uapi/linux/i2c.h \
   /usr/src/linux-headers-6.12.75+rpt-common-rpi/include/linux/miscdevice.h \
   /usr/src/linux-headers-6.12.75+rpt-common-rpi/include/uapi/linux/major.h \
-  /usr/src/linux-headers-6.12.75+rpt-common-rpi/include/linux/gpio.h \
+  /usr/src/linux-headers-6.12.75+rpt-common-rpi/include/linux/platform_device.h \
+    $(wildcard include/config/HIBERNATE_CALLBACKS) \
+    $(wildcard include/config/SUPERH) \
   /usr/src/linux-headers-6.12.75+rpt-common-rpi/include/linux/gpio/consumer.h \
     $(wildcard include/config/GPIO_SYSFS) \
   /home/mauronav006/Documents/GeoBoard/DriverFiles/driver/geoboard_ioctl.h \
