@@ -1,0 +1,6 @@
+# workers.conf.example
+# Una maquina por linea. No incluya la Raspberry aqui.
+# Estos nombres/IP deben aceptar SSH desde la Raspberry sin contraseña.
+worker1
+worker2
+worker3

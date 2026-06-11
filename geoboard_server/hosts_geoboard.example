@@ -1,0 +1,27 @@
+# hosts_geoboard.example
+#
+# Este archivo se usa desde la Raspberry Pi, porque ahora la Raspberry es
+# el servidor/orquestador y la que controla el hardware por GPIO.
+#
+# Cambia los nombres/IP por los de sus máquinas reales.
+#
+# La Raspberry necesita 2 slots:
+#   rank 0 -> cliente local que lee imagen de la carpeta images/
+#   rank 1 -> servidor/orquestador que luego llama biblioteca/driver/GPIO
+#
+# Los otros 3 hosts son los nodos/workers:
+#   rank 2 -> worker 1
+#   rank 3 -> worker 2
+#   rank 4 -> worker 3
+#
+# Ejemplo por hostname:
+raspberrypi slots=2
+worker1 slots=1
+worker2 slots=1
+worker3 slots=1
+
+# Ejemplo por IP, si no tienen hostnames configurados:
+# 192.168.1.20 slots=2
+# 192.168.1.21 slots=1
+# 192.168.1.22 slots=1
+# 192.168.1.23 slots=1
