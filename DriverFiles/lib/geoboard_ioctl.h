@@ -23,7 +23,10 @@ struct geo_point  { int x; int y; };
 #define GEO_RESET_SERVO _IO (GEO_IOC_MAGIC, 6)
 #define GEO_READ_BUTTON _IOR(GEO_IOC_MAGIC, 7, int)
 
-#define GEO_IOC_MAXNR 7
+#define GEO_BUZZER  _IOW(GEO_IOC_MAGIC, 9, int)   /* 1 = encender, 0 = apagar */
+
+/* y asegúrate de que GEO_IOC_MAXNR sea al menos 9 */
+#define GEO_IOC_MAXNR  9
 
 //Button constants
 

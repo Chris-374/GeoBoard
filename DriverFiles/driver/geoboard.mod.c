@@ -41,6 +41,7 @@ __used __section("__versions") = {
 	{ 0x9618ede0, "mutex_unlock" },
 	{ 0xb708fb6b, "gpiod_get_value" },
 	{ 0x51a910c0, "arm_copy_to_user" },
+	{ 0xc9ce4d41, "gpiod_set_value" },
 	{ 0xf1ce2f51, "module_layout" },
 };
 
@@ -49,4 +50,4 @@ MODULE_INFO(depends, "");
 MODULE_ALIAS("of:N*T*Cgeoboard,buttons");
 MODULE_ALIAS("of:N*T*Cgeoboard,buttonsC*");
 
-MODULE_INFO(srcversion, "9B9F8D008CE88F1D67CE432");
+MODULE_INFO(srcversion, "E540FEBFBDBA1DB17F1A00E");

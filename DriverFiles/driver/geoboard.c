@@ -48,6 +48,7 @@ static const int btn_codes[NBTN] = {
 	GEO_BTN_RIGHT, GEO_BTN_SELECT, GEO_BTN_CHECK
 };
 static struct gpio_desc *btn_desc[NBTN];
+static struct gpio_desc *buzzer;
 
 /* Devuelve el codigo del primer boton presionado, o GEO_BTN_NONE.
  * Como el overlay marca los pines ACTIVE_LOW, gpiod_get_value() ya
@@ -177,6 +178,17 @@ static long geo_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			ret = -EFAULT;
 		break;
 	}
+	
+	case GEO_BUZZER: {
+	  int on;
+
+	  if (copy_from_user(&on, (void __user *)arg, sizeof(on))) {
+	   ret = -EFAULT;
+	   break;
+	  }
+	  gpiod_set_value(buzzer, on ? 1 : 0);
+	  break;
+	 }
 
 	default:
 		ret = -ENOTTY;
@@ -234,6 +246,12 @@ static int geoboard_probe(struct platform_device *pdev)
 				btn_names[i], ret);
 			goto err_client;   /* devm libera los ya pedidos */
 		}
+	}
+	buzzer = devm_gpiod_get(dev, "buzzer", GPIOD_OUT_LOW);
+	if (IS_ERR(buzzer)) {
+	 ret = PTR_ERR(buzzer);
+	 dev_err(dev, "fallo gpiod 'buzzer-gpios' (%d)\n", ret);
+	 goto err_client;
 	}
 
 	/* --- Character device --- */

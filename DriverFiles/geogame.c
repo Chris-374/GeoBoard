@@ -39,6 +39,34 @@ static int read_button(void)
 	return b;
 }
 
+/* Enciende (1) o apaga (0) el buzzer */
+static void buzzer(int on)
+{
+	int v = on;
+	ioctl(fd, GEO_BUZZER, &v);
+}
+
+/* Sonido de exito: tres bips, ~un bip por segundo (0.3 s suena + 0.7 s silencio) */
+static void sound_success(void)
+{
+	int i;
+
+	for (i = 0; i < 3; i++) {
+		buzzer(1);
+		usleep(300000);
+		buzzer(0);
+		usleep(700000);
+	}
+}
+
+/* Sonido de error: un tono largo continuo de 3 segundos */
+static void sound_error(void)
+{
+	buzzer(1);
+	sleep(3);
+	buzzer(0);
+}
+
 /* Parpadeo de exito: toda la matriz 5 veces */
 static void blink_success(void)
 {
@@ -100,8 +128,12 @@ int main(void)
 					user[cy] ^= (1 << cx);  /* fija/quita */
 					break;
 				case GEO_BTN_CHECK:
-					if (memcmp(user, target, 8) == 0)
-						blink_success();
+					if (memcmp(user, target, 8) == 0) {
+						sound_success();    /* bip-bip-bip */
+						blink_success();    /* matriz 5 veces */
+					} else {
+						sound_error();      /* biiiip 3 s   */
+					}
 					goto restart;           /* siempre reinicia */
 				}
 			}
