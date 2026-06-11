@@ -20,6 +20,8 @@
 #include <linux/platform_device.h>
 #include <linux/gpio/consumer.h>
 #include <linux/of.h>
+#include <linux/hrtimer.h>
+#include <linux/ktime.h>
 #include "geoboard_ioctl.h"
 
 #define I2C_BUS_NUM      1
@@ -48,7 +50,20 @@ static const int btn_codes[NBTN] = {
 	GEO_BTN_RIGHT, GEO_BTN_SELECT, GEO_BTN_CHECK
 };
 static struct gpio_desc *btn_desc[NBTN];
+/* ---- Servo (BUZZER GPIO 6) ---- */
 static struct gpio_desc *buzzer;
+/* ---- Servo (PWM por software con hrtimer en GPIO 13) ---- */
+static struct gpio_desc *servo;
+static struct hrtimer    servo_timer;
+static int   servo_pulse_us;       /* ancho de pulso objetivo (us) */
+static int   servo_cycles_left;    /* periodos de 20 ms restantes  */
+static bool  servo_high;           /* fase actual del pulso        */
+
+#define SERVO_PERIOD_US    20000   /* 50 Hz                        */
+#define SERVO_UP_US         2000   /* bandera arriba (~+90)        */
+#define SERVO_DOWN_US       1000   /* bandera abajo  (~-90)        */
+#define SERVO_MOVE_CYCLES     30   /* 30 * 20 ms = 600 ms          */
+#define US_TO_KT(us)  ns_to_ktime((u64)(us) * 1000)
 
 /* Devuelve el codigo del primer boton presionado, o GEO_BTN_NONE.
  * Como el overlay marca los pines ACTIVE_LOW, gpiod_get_value() ya
@@ -120,6 +135,38 @@ static ssize_t geo_write(struct file *f, const char __user *ubuf,
 	return (ret < 0) ? ret : (ssize_t)len;
 }
 
+/* Conmuta el GPIO para formar el pulso PWM; corre en contexto atomico. */
+static enum hrtimer_restart servo_tick(struct hrtimer *t)
+{
+ if (servo_high) {
+  gpiod_set_value(servo, 0);          /* fin del pulso alto */
+  servo_high = false;
+  hrtimer_forward_now(t, US_TO_KT(SERVO_PERIOD_US - servo_pulse_us));
+  return HRTIMER_RESTART;
+ }
+
+ /* fin del periodo: empezar otro, salvo que se acaben los ciclos */
+ if (--servo_cycles_left <= 0) {
+  gpiod_set_value(servo, 0);          /* suelta el servo */
+  return HRTIMER_NORESTART;
+ }
+ gpiod_set_value(servo, 1);
+ servo_high = true;
+ hrtimer_forward_now(t, US_TO_KT(servo_pulse_us));
+ return HRTIMER_RESTART;
+}
+
+/* Mueve el servo al ancho de pulso indicado durante ~600 ms y lo suelta. */
+static void servo_move(int pulse_us)
+{
+ hrtimer_cancel(&servo_timer);       /* detén cualquier movimiento previo */
+ servo_pulse_us    = pulse_us;
+ servo_cycles_left = SERVO_MOVE_CYCLES;
+ servo_high        = true;
+ gpiod_set_value(servo, 1);
+ hrtimer_start(&servo_timer, US_TO_KT(pulse_us), HRTIMER_MODE_REL);
+}
+
 /* ====================== IOCTL ====================== */
 static long geo_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
@@ -189,6 +236,17 @@ static long geo_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	  gpiod_set_value(buzzer, on ? 1 : 0);
 	  break;
 	 }
+	 
+	case GEO_SERVO: {
+	  int up;
+
+	  if (copy_from_user(&up, (void __user *)arg, sizeof(up))) {
+	   ret = -EFAULT;
+	   break;
+	  }
+	  servo_move(up ? SERVO_UP_US : SERVO_DOWN_US);
+	  break;
+	 }
 
 	default:
 		ret = -ENOTTY;
@@ -247,12 +305,22 @@ static int geoboard_probe(struct platform_device *pdev)
 			goto err_client;   /* devm libera los ya pedidos */
 		}
 	}
+	
 	buzzer = devm_gpiod_get(dev, "buzzer", GPIOD_OUT_LOW);
 	if (IS_ERR(buzzer)) {
 	 ret = PTR_ERR(buzzer);
 	 dev_err(dev, "fallo gpiod 'buzzer-gpios' (%d)\n", ret);
 	 goto err_client;
 	}
+	
+	servo = devm_gpiod_get(dev, "servo", GPIOD_OUT_LOW);
+	 if (IS_ERR(servo)) {
+	  ret = PTR_ERR(servo);
+	  dev_err(dev, "fallo gpiod 'servo-gpios' (%d)\n", ret);
+	  goto err_client;
+	 }
+	 hrtimer_init(&servo_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	 servo_timer.function = servo_tick;
 
 	/* --- Character device --- */
 	ret = misc_register(&geo_misc);
@@ -280,6 +348,8 @@ static void geoboard_remove(struct platform_device *pdev)
 	i2c_put_adapter(geo_adapter);
 	/* los descriptores gpiod se liberan solos (devm) */
 	dev_info(&pdev->dev, "geoboard descargado\n");
+	
+	hrtimer_cancel(&servo_timer);
 }
 
 static const struct of_device_id geoboard_of_match[] = {

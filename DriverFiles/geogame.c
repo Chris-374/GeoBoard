@@ -46,6 +46,13 @@ static void buzzer(int on)
 	ioctl(fd, GEO_BUZZER, &v);
 }
 
+/* Sube (1) o baja (0) la bandera con el servo */
+static void servo_flag(int up)
+{
+	int v = up;
+	ioctl(fd, GEO_SERVO, &v);
+}
+
 /* Sonido de exito: tres bips, ~un bip por segundo (0.3 s suena + 0.7 s silencio) */
 static void sound_success(void)
 {
@@ -129,8 +136,10 @@ int main(void)
 					break;
 				case GEO_BTN_CHECK:
 					if (memcmp(user, target, 8) == 0) {
-						sound_success();    /* bip-bip-bip */
-						blink_success();    /* matriz 5 veces */
+						servo_flag(1);      /* sube la bandera */
+						sound_success();    /* bip-bip-bip     */
+						blink_success();    /* matriz 5 veces  */
+						servo_flag(0);      /* baja la bandera */
 					} else {
 						sound_error();      /* biiiip 3 s   */
 					}

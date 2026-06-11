@@ -48,6 +48,9 @@
 				/* Buzzer (salida). 0 = GPIO_ACTIVE_HIGH: 1 = suena. */
 				buzzer-gpios  = <&gpio 6 0>;
 
+				/* Servo (salida, PWM por software desde el driver). */
+				servo-gpios   = <&gpio 13 0>;
+
 				status = "okay";
 			};
 		};

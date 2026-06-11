@@ -25,8 +25,9 @@ struct geo_point  { int x; int y; };
 
 #define GEO_BUZZER  _IOW(GEO_IOC_MAGIC, 9, int)   /* 1 = encender, 0 = apagar */
 
-/* y asegúrate de que GEO_IOC_MAXNR sea al menos 9 */
-#define GEO_IOC_MAXNR  9
+#define GEO_SERVO   _IOW(GEO_IOC_MAGIC, 10, int)   /* 1 = subir bandera, 0 = bajar */
+
+#define GEO_IOC_MAXNR  10
 
 // Button constants
 
