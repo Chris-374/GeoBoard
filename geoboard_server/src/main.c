@@ -5,7 +5,7 @@
  *
  * Este mismo binario funciona como:
  * - servidor/orquestador si el rank global es 1
- * - worker si el rank global es 2, 3 o 4
+ * - worker si el rank global es 2 o superior
  *
  * El rank 0 NO debe ejecutar este binario. El rank 0 debe ser el cliente.
  */
@@ -31,8 +31,7 @@ int main(int argc, char **argv) {
 
     if (rank == GEOBOARD_SERVER_RANK) {
         exit_code = server_main(world_size);
-    } else if (rank >= GEOBOARD_FIRST_WORKER_RANK &&
-               rank <= GEOBOARD_LAST_WORKER_RANK) {
+    } else if (rank >= GEOBOARD_FIRST_WORKER_RANK) {
         exit_code = worker_main(rank);
     } else if (rank == GEOBOARD_CLIENT_RANK) {
         fprintf(stderr, "[INFO] Rank 0 pertenece al cliente. Ejecute con MPMD:\n");

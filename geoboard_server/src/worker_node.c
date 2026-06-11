@@ -120,8 +120,8 @@ int worker_main(int rank) {
         return EXIT_FAILURE;
     }
 
-    if (header.region_count != 3u) {
-        fprintf(stderr, "[WORKER %d] Tarea invalida.\n", rank);
+    if (header.region_count == 0u || header.region_count > GEOBOARD_MAX_REGIONS_PER_WORKER) {
+        fprintf(stderr, "[WORKER %d] Tarea invalida. region_count=%u\n", rank, header.region_count);
         return EXIT_FAILURE;
     }
 
@@ -181,12 +181,20 @@ int worker_main(int rank) {
         double t0;
         double t1;
 
-        printf("[WORKER %d] Procesando regiones %u, %u, %u con GEOBOARD_HEAVY_PASSES=%u...\n",
+        uint32_t region_i;
+
+        printf("[WORKER %d] Procesando %u regiones con GEOBOARD_HEAVY_PASSES=%u: ",
                rank,
-               header.regions[0].region_id,
-               header.regions[1].region_id,
-               header.regions[2].region_id,
+               header.region_count,
                heavy_passes);
+
+        for (region_i = 0; region_i < header.region_count; region_i++) {
+            printf("%u", header.regions[region_i].region_id);
+            if (region_i + 1u < header.region_count) {
+                printf(",");
+            }
+        }
+        printf("\n");
 
         t0 = MPI_Wtime();
 

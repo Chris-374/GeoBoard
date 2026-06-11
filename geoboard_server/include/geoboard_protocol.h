@@ -13,7 +13,9 @@
  * - La comunicacion se realiza con MPI_Send/MPI_Recv.
  * - El rank 0 pertenece al cliente.
  * - El rank 1 pertenece al servidor.
- * - Los ranks 2, 3 y 4 pertenecen a los tres workers.
+ * - Los ranks 2 en adelante pertenecen a workers.
+ * - En modo normal se usan 3 workers.
+ * - En modo failover se puede relanzar con 2 workers si un nodo cae.
  */
 
 #include <stdint.h>
@@ -22,8 +24,9 @@
 #define GEOBOARD_SERVER_RANK 1
 
 #define GEOBOARD_FIRST_WORKER_RANK 2
-#define GEOBOARD_WORKER_COUNT 3
-#define GEOBOARD_LAST_WORKER_RANK (GEOBOARD_FIRST_WORKER_RANK + GEOBOARD_WORKER_COUNT - 1)
+#define GEOBOARD_DEFAULT_WORKER_COUNT 3
+#define GEOBOARD_MIN_FAILOVER_WORKERS 2
+#define GEOBOARD_MAX_REGIONS_PER_WORKER 9
 
 /* Magic usado para validar que el mensaje recibido viene del protocolo GeoBoard. */
 #define GEOBOARD_MAGIC   0x47424F44u  /* 'GBOD' */
@@ -88,7 +91,9 @@ enum {
  *   [4][5][6]
  *   [7][8][9]
  *
- * Cada worker recibe una fila completa de esa malla, o sea 3 regiones.
+ * En modo normal cada worker recibe una fila completa, o sea 3 regiones.
+ * En modo failover el servidor puede reagrupar regiones y mandar mas de
+ * 3 regiones a un worker sobreviviente.
  */
 typedef struct {
     uint32_t region_id;
@@ -126,7 +131,7 @@ typedef struct {
     uint32_t stripe_start_y;
     uint32_t stripe_height;
 
-    RegionInfo regions[3];
+    RegionInfo regions[GEOBOARD_MAX_REGIONS_PER_WORKER];
 } WorkerTaskHeader;
 
 /*

@@ -109,11 +109,14 @@ static int build_worker_payload_from_encrypted(const uint8_t *encrypted_data,
                                                uint64_t file_size,
                                                const PgmMetadata *metadata,
                                                uint32_t worker_index,
+                                               uint32_t worker_count,
                                                uint32_t client_counter,
                                                const uint8_t client_nonce[CHACHA20_NONCE_SIZE],
                                                WorkerTaskHeader *header,
                                                uint8_t **out_payload) {
-    uint32_t row = worker_index;
+    uint32_t region_row_start;
+    uint32_t region_row_end;
+    uint32_t region_row;
     uint32_t col;
     uint32_t y0;
     uint32_t y1;
@@ -126,10 +129,31 @@ static int build_worker_payload_from_encrypted(const uint8_t *encrypted_data,
         return -1;
     }
 
+    if (worker_count == 0u || worker_count > GEOBOARD_MAX_REGIONS_PER_WORKER) {
+        fprintf(stderr, "[SERVIDOR] worker_count invalido: %u\n", worker_count);
+        return -1;
+    }
+
     memset(header, 0, sizeof(*header));
 
-    y0 = region_y0(metadata->height, row);
-    y1 = region_y1(metadata->height, row);
+    /*
+     * La malla logica sigue siendo 3x3. En modo normal hay 3 workers y cada
+     * uno toma una fila de la malla. En modo failover puede haber 2 workers;
+     * entonces se reagrupan filas completas de la malla entre los sobrevivientes.
+     */
+    region_row_start = (worker_index * 3u) / worker_count;
+    region_row_end = ((worker_index + 1u) * 3u) / worker_count;
+
+    if (region_row_end <= region_row_start) {
+        region_row_end = region_row_start + 1u;
+    }
+
+    if (region_row_end > 3u) {
+        region_row_end = 3u;
+    }
+
+    y0 = region_y0(metadata->height, region_row_start);
+    y1 = region_y1(metadata->height, region_row_end - 1u);
     stripe_height = y1 - y0;
 
     payload_file_offset = metadata->pixel_data_offset + ((uint64_t)y0 * metadata->width);
@@ -150,7 +174,6 @@ static int build_worker_payload_from_encrypted(const uint8_t *encrypted_data,
     header->worker_index = worker_index;
     header->image_width = metadata->width;
     header->image_height = metadata->height;
-    header->region_count = 3u;
     header->payload_size = (uint32_t)payload_size64;
 
     /*
@@ -163,16 +186,30 @@ static int build_worker_payload_from_encrypted(const uint8_t *encrypted_data,
     header->stripe_start_y = y0;
     header->stripe_height = stripe_height;
 
-    for (col = 0; col < 3u; col++) {
-        uint32_t x0 = region_x0(metadata->width, col);
-        uint32_t x1 = region_x1(metadata->width, col);
-        RegionInfo *region = &header->regions[col];
+    header->region_count = 0u;
 
-        region->region_id = (row * 3u) + col + 1u;
-        region->start_x = x0;
-        region->start_y = y0;
-        region->width = x1 - x0;
-        region->height = stripe_height;
+    for (region_row = region_row_start; region_row < region_row_end; region_row++) {
+        uint32_t ry0 = region_y0(metadata->height, region_row);
+        uint32_t ry1 = region_y1(metadata->height, region_row);
+
+        for (col = 0; col < 3u; col++) {
+            uint32_t x0 = region_x0(metadata->width, col);
+            uint32_t x1 = region_x1(metadata->width, col);
+            RegionInfo *region;
+
+            if (header->region_count >= GEOBOARD_MAX_REGIONS_PER_WORKER) {
+                fprintf(stderr, "[SERVIDOR] Demasiadas regiones para un worker.\n");
+                return -1;
+            }
+
+            region = &header->regions[header->region_count];
+            region->region_id = (region_row * 3u) + col + 1u;
+            region->start_x = x0;
+            region->start_y = ry0;
+            region->width = x1 - x0;
+            region->height = ry1 - ry0;
+            header->region_count++;
+        }
     }
 
     if (payload_size64 > 0) {
@@ -196,6 +233,7 @@ static int send_worker_task(int worker_rank,
                             uint64_t file_size,
                             const PgmMetadata *metadata,
                             uint32_t worker_index,
+                            uint32_t worker_count,
                             uint32_t client_counter,
                             const uint8_t client_nonce[CHACHA20_NONCE_SIZE]) {
     WorkerTaskHeader header;
@@ -205,6 +243,7 @@ static int send_worker_task(int worker_rank,
                                             file_size,
                                             metadata,
                                             worker_index,
+                                            worker_count,
                                             client_counter,
                                             client_nonce,
                                             &header,
@@ -239,26 +278,34 @@ static int send_worker_task(int worker_rank,
         }
     }
 
-    printf("[SERVIDOR] Enviadas regiones %u, %u, %u al worker rank %d como franja CIFRADA original.\n",
-           header.regions[0].region_id,
-           header.regions[1].region_id,
-           header.regions[2].region_id,
-           worker_rank);
+    {
+        uint32_t i;
+        printf("[SERVIDOR] Enviadas %u regiones al worker rank %d como franja CIFRADA original: ",
+               header.region_count,
+               worker_rank);
+
+        for (i = 0; i < header.region_count; i++) {
+            printf("%u", header.regions[i].region_id);
+            if (i + 1u < header.region_count) {
+                printf(",");
+            }
+        }
+        printf("\n");
+    }
 
     free(payload);
     return 0;
 }
 
-static void send_shutdown_to_workers(void) {
-    int rank;
+static void send_shutdown_to_workers(uint32_t worker_count) {
+    uint32_t worker_index;
     WorkerTaskHeader header;
 
     memset(&header, 0, sizeof(header));
     header.magic = WORKER_SHUTDOWN_MAGIC;
 
-    for (rank = GEOBOARD_FIRST_WORKER_RANK;
-         rank <= GEOBOARD_LAST_WORKER_RANK;
-         rank++) {
+    for (worker_index = 0; worker_index < worker_count; worker_index++) {
+        int rank = GEOBOARD_FIRST_WORKER_RANK + (int)worker_index;
         MPI_Send(&header,
                  (int)sizeof(header),
                  MPI_BYTE,
@@ -449,6 +496,7 @@ int server_main(int world_size) {
     int32_t global_max_y = -1;
 
     int worker_index;
+    uint32_t worker_count = 0;
 
     double t_server_start;
     double t_receive_done;
@@ -464,16 +512,32 @@ int server_main(int world_size) {
 
     t_server_start = MPI_Wtime();
 
-    if (world_size < 5) {
+    if (world_size < 4) {
         fprintf(stderr,
-                "[SERVIDOR] Se necesitan 5 ranks globales: cliente, servidor y 3 workers.\n");
+                "[SERVIDOR] Se necesitan al menos 4 ranks globales: cliente, servidor y 2 workers.\n");
         fprintf(stderr,
-                "[SERVIDOR] Ejemplo: mpirun -np 1 ./geoboard_client imagen.pgm : -np 4 ./geoboard_server_cluster\n");
+                "[SERVIDOR] Modo normal: cliente + servidor + 3 workers = 5 ranks.\n");
+        fprintf(stderr,
+                "[SERVIDOR] Modo failover: cliente + servidor + 2 workers = 4 ranks.\n");
         return EXIT_FAILURE;
     }
 
+    worker_count = (uint32_t)(world_size - GEOBOARD_FIRST_WORKER_RANK);
+
+    if (worker_count < GEOBOARD_MIN_FAILOVER_WORKERS) {
+        fprintf(stderr, "[SERVIDOR] No hay suficientes workers activos.\n");
+        return EXIT_FAILURE;
+    }
+
+    if (worker_count < GEOBOARD_DEFAULT_WORKER_COUNT) {
+        printf("[SERVIDOR] MODO FAILOVER: se ejecuta con %u workers sobrevivientes.\n", worker_count);
+        printf("[SERVIDOR] La carga se reagrupara entre los workers activos.\n");
+    } else {
+        printf("[SERVIDOR] MODO NORMAL: se ejecuta con %u workers.\n", worker_count);
+    }
+
     if (ensure_output_dir() != 0) {
-        send_shutdown_to_workers();
+        send_shutdown_to_workers(worker_count);
         return EXIT_FAILURE;
     }
 
@@ -483,7 +547,7 @@ int server_main(int world_size) {
                             sizeof(filename),
                             &counter,
                             nonce) != 0) {
-        send_shutdown_to_workers();
+        send_shutdown_to_workers(worker_count);
         return EXIT_FAILURE;
     }
 
@@ -515,7 +579,7 @@ int server_main(int world_size) {
         fprintf(stderr,
                 "[SERVIDOR] No se pudo interpretar metadata PGM cifrada. Use PGM P5.\n");
         free(encrypted_data);
-        send_shutdown_to_workers();
+        send_shutdown_to_workers(worker_count);
         return EXIT_FAILURE;
     }
 
@@ -527,11 +591,11 @@ int server_main(int world_size) {
            metadata.max_value,
            (unsigned long long)metadata.pixel_data_offset);
     printf("[SERVIDOR] El servidor NO descifra los pixeles completos; los workers descifran sus franjas.\n");
-    printf("[SERVIDOR] La imagen puede tener cualquier resolucion positiva; se divide proporcionalmente en 3x3 y se reduce a 8x8.\n");
+    printf("[SERVIDOR] La imagen puede tener cualquier resolucion positiva; se divide en malla 3x3 y se redistribuye entre los workers activos.\n");
 
     t_distributed_start = MPI_Wtime();
 
-    for (worker_index = 0; worker_index < GEOBOARD_WORKER_COUNT; worker_index++) {
+    for (worker_index = 0; worker_index < (int)worker_count; worker_index++) {
         int worker_rank = GEOBOARD_FIRST_WORKER_RANK + worker_index;
 
         if (send_worker_task(worker_rank,
@@ -539,6 +603,7 @@ int server_main(int world_size) {
                              file_size,
                              &metadata,
                              (uint32_t)worker_index,
+                             worker_count,
                              counter,
                              nonce) != 0) {
             fprintf(stderr,
@@ -546,12 +611,12 @@ int server_main(int world_size) {
                     worker_rank);
 
             free(encrypted_data);
-            send_shutdown_to_workers();
+            send_shutdown_to_workers(worker_count);
             return EXIT_FAILURE;
         }
     }
 
-    for (worker_index = 0; worker_index < GEOBOARD_WORKER_COUNT; worker_index++) {
+    for (worker_index = 0; worker_index < (int)worker_count; worker_index++) {
         WorkerResult result;
         int y;
 
