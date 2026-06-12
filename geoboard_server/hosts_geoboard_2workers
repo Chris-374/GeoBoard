@@ -1,0 +1,28 @@
+# hosts_geoboard_2workers
+#
+# Hostfile para cluster con Raspberry Pi como servidor y 2 laptops x86.
+#
+# Distribucion de ranks:
+#   rank 0  -> cliente     (Raspberry Pi)
+#   rank 1  -> servidor    (Raspberry Pi)
+#   rank 2  -> worker 0    (laptop x86 #1)
+#   rank 3  -> worker 1    (laptop x86 #2)
+#
+# La Raspberry necesita 2 slots porque corre tanto el cliente (rank 0)
+# como el servidor/orquestador (rank 1).
+#
+# INSTRUCCIONES:
+#   1. Cambia "raspberrypi" por el hostname real de tu Pi
+#      (o su IP, ej: 192.168.1.20)
+#   2. Cambia "worker1" y "worker2" por los hostnames o IPs de tus laptops
+#      (ej: 192.168.1.21 y 192.168.1.22)
+#   3. Verifica conectividad: desde la Pi haz "ping worker1" y "ping worker2"
+
+raspberrypi slots=2
+worker1     slots=1
+worker2     slots=1
+
+# --- Alternativa por IP (si no tienen hostnames configurados) ---
+# 192.168.1.20 slots=2
+# 192.168.1.21 slots=1
+# 192.168.1.22 slots=1
