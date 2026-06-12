@@ -184,10 +184,15 @@ int parse_pgm_metadata(const uint8_t *data,
 
     total_pixels = (uint64_t)metadata->width * (uint64_t)metadata->height;
 
-    if (size - pos < total_pixels) {
-        fprintf(stderr,
-                "[SERVIDOR] PGM P5 incompleto. Esperados %llu bytes de pixeles.\n",
-                (unsigned long long)total_pixels);
+    /*
+     * OJO: parse_pgm_metadata() se usa tambien cuando el servidor solo
+     * descifra un prefijo pequeno del archivo cifrado para leer el header.
+     * Por eso NO se debe exigir aqui que el buffer recibido contenga todos
+     * los pixeles. La validacion contra el tamano real del archivo se hace
+     * en parse_encrypted_pgm_metadata(), usando file_size completo.
+     */
+    if (pos >= size) {
+        fprintf(stderr, "[SERVIDOR] PGM P5 sin inicio de datos de pixeles.\n");
         return -1;
     }
 

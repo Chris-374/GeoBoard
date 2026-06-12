@@ -52,6 +52,63 @@ int geoboard_set_brightness(int brightness)
     return ioctl(geo_fd, GEO_BRIGHTNESS, &brightness);
 }
 
+int geoboard_read_button(void)
+{
+    int button = GEO_BTN_NONE;
+
+    if (geo_fd < 0)
+        return GEO_BTN_NONE;
+
+    if (ioctl(geo_fd, GEO_READ_BUTTON, &button) != 0)
+        return GEO_BTN_NONE;
+
+    return button;
+}
+
+int geoboard_buzzer(int on)
+{
+    int value = on ? 1 : 0;
+
+    if (geo_fd < 0)
+        return -1;
+
+    return ioctl(geo_fd, GEO_BUZZER, &value);
+}
+
+int geoboard_servo(int up)
+{
+    int value = up ? 1 : 0;
+
+    if (geo_fd < 0)
+        return -1;
+
+    return ioctl(geo_fd, GEO_SERVO, &value);
+}
+
+int geoboard_success(void)
+{
+    if (geo_fd < 0)
+        return -1;
+
+    return ioctl(geo_fd, GEO_SUCCESS);
+}
+
+int geoboard_error(void)
+{
+    if (geo_fd < 0)
+        return -1;
+
+    return ioctl(geo_fd, GEO_ERROR);
+}
+
+int geoboard_reset_servo(void)
+{
+    if (geo_fd < 0)
+        return -1;
+
+    return ioctl(geo_fd, GEO_RESET_SERVO);
+}
+
 int geoboard_close(void)
 {
     int ret;

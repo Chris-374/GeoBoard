@@ -198,21 +198,33 @@ static int is_edge_pixel_in_region(const uint8_t *region_pixels,
                                    uint32_t width,
                                    uint32_t height,
                                    uint32_t x,
-                                   uint32_t y) {
+                                   uint32_t y,
+                                   uint32_t global_x,
+                                   uint32_t global_y,
+                                   uint32_t image_width,
+                                   uint32_t image_height) {
     int current = is_active_pixel(region_pixels[(y * width) + x]);
 
     if (!current) {
         return 0;
     }
 
-    if (x == 0 || y == 0 || x + 1 >= width || y + 1 >= height) {
+    /*
+     * No marcamos automaticamente los bordes de cada region como contorno,
+     * porque la imagen fue partida en una malla 3x3. Si se hiciera eso,
+     * aparecerian lineas falsas justo donde se dividio la imagen.
+     * Solo se considera borde fisico si el pixel esta en el borde real de
+     * la imagen completa, o si un vecino local inmediato es fondo.
+     */
+    if (global_x == 0u || global_y == 0u ||
+        global_x + 1u >= image_width || global_y + 1u >= image_height) {
         return 1;
     }
 
-    if (!is_active_pixel(region_pixels[(y * width) + (x - 1)])) return 1;
-    if (!is_active_pixel(region_pixels[(y * width) + (x + 1)])) return 1;
-    if (!is_active_pixel(region_pixels[((y - 1) * width) + x])) return 1;
-    if (!is_active_pixel(region_pixels[((y + 1) * width) + x])) return 1;
+    if (x > 0u && !is_active_pixel(region_pixels[(y * width) + (x - 1u)])) return 1;
+    if (x + 1u < width && !is_active_pixel(region_pixels[(y * width) + (x + 1u)])) return 1;
+    if (y > 0u && !is_active_pixel(region_pixels[((y - 1u) * width) + x])) return 1;
+    if (y + 1u < height && !is_active_pixel(region_pixels[((y + 1u) * width) + x])) return 1;
 
     return 0;
 }
@@ -267,7 +279,27 @@ void process_worker_regions(const WorkerTaskHeader *header,
                     if (mask_x > 7u) mask_x = 7u;
                     if (mask_y > 7u) mask_y = 7u;
 
-                    result->mask[mask_y] |= (uint8_t)(1u << (7u - mask_x));
+                    int is_edge = is_edge_pixel_in_region(region_pixels,
+                                                          region->width,
+                                                          region->height,
+                                                          x,
+                                                          y,
+                                                          global_x,
+                                                          global_y,
+                                                          header->image_width,
+                                                          header->image_height);
+
+                    /*
+                     * La mascara 8x8 final representa SOLO el contorno.
+                     * Los pixeles activos internos se siguen contando para
+                     * metricas y bounding box, pero no se encienden en la
+                     * mascara que ve el usuario.
+                     */
+                    if (is_edge) {
+                        result->mask[mask_y] |= (uint8_t)(1u << (7u - mask_x));
+                        result->edge_pixels++;
+                    }
+
                     result->active_pixels++;
                     result->has_content = 1u;
 
@@ -289,14 +321,6 @@ void process_worker_regions(const WorkerTaskHeader *header,
                     if (result->bbox_max_y < 0 ||
                         (int32_t)global_y > result->bbox_max_y) {
                         result->bbox_max_y = (int32_t)global_y;
-                    }
-
-                    if (is_edge_pixel_in_region(region_pixels,
-                                                region->width,
-                                                region->height,
-                                                x,
-                                                y)) {
-                        result->edge_pixels++;
                     }
                 }
             }

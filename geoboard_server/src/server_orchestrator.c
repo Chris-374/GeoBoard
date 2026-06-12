@@ -22,12 +22,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "chacha20.h"
 #include "file_utils.h"
 #include "geoboard_protocol.h"
 #include "pgm_image.h"
 #include "server_orchestrator.h"
+#include "geoboard.h"
 
 #define HEADER_DECRYPT_INITIAL_SIZE 4096u
 #define HEADER_DECRYPT_MAX_SIZE     1048576u
@@ -433,6 +435,270 @@ static int receive_client_file(uint8_t **out_encrypted_data,
     return 0;
 }
 
+
+/*
+ * Mini juego del GeoBoard.
+ *
+ * La mascara generada por MPI usa bit 7 como columna izquierda para que la
+ * impresion en consola sea legible. El driver usa bit 0 como x=0, por eso se
+ * invierte cada fila antes de dibujar o comparar contra la respuesta del
+ * usuario.
+ *
+ * Variables utiles para la demo:
+ *   GEOBOARD_SKIP_HARDWARE=1       -> no intenta abrir /dev/geoboard
+ *   GEOBOARD_SKIP_GAME=1           -> solo muestra la figura, no entra al juego
+ *   GEOBOARD_HW_SECONDS=N          -> tiempo que muestra la figura, default 10
+ *   GEOBOARD_TOLERANCE=N           -> porcentaje minimo de coincidencia, default 75
+ */
+static uint8_t reverse_bits8(uint8_t value) {
+    value = (uint8_t)(((value & 0xF0u) >> 4) | ((value & 0x0Fu) << 4));
+    value = (uint8_t)(((value & 0xCCu) >> 2) | ((value & 0x33u) << 2));
+    value = (uint8_t)(((value & 0xAAu) >> 1) | ((value & 0x55u) << 1));
+    return value;
+}
+
+static int get_env_int_range(const char *name, int default_value, int min_value, int max_value) {
+    const char *env_value = getenv(name);
+    char *end_ptr = NULL;
+    long parsed;
+
+    if (env_value == NULL || env_value[0] == '\0') {
+        return default_value;
+    }
+
+    parsed = strtol(env_value, &end_ptr, 10);
+    if (end_ptr == env_value || *end_ptr != '\0' || parsed < min_value || parsed > max_value) {
+        return default_value;
+    }
+
+    return (int)parsed;
+}
+
+static unsigned int bitcount8(uint8_t value) {
+    unsigned int count = 0;
+    while (value != 0u) {
+        count += (unsigned int)(value & 1u);
+        value >>= 1;
+    }
+    return count;
+}
+
+static int score_mask_pct(const uint8_t user[8], const uint8_t target[8]) {
+    unsigned int intersection = 0;
+    unsigned int union_count = 0;
+    int y;
+
+    for (y = 0; y < 8; y++) {
+        intersection += bitcount8((uint8_t)(user[y] & target[y]));
+        union_count += bitcount8((uint8_t)(user[y] | target[y]));
+    }
+
+    if (union_count == 0u) {
+        return 100;
+    }
+
+    return (int)((intersection * 100u) / union_count);
+}
+
+static void sound_success(void) {
+    int i;
+
+    for (i = 0; i < 3; i++) {
+        geoboard_buzzer(1);
+        usleep(300000u);
+        geoboard_buzzer(0);
+        usleep(250000u);
+    }
+}
+
+static void sound_error(void) {
+    geoboard_buzzer(1);
+    sleep(1u);
+    geoboard_buzzer(0);
+}
+
+static void blink_mask(const uint8_t mask[8], int times) {
+    int i;
+
+    for (i = 0; i < times; i++) {
+        geoboard_draw_matrix((uint8_t *)mask);
+        usleep(200000u);
+        geoboard_clear();
+        usleep(200000u);
+    }
+}
+
+static void run_hardware_game(const uint8_t final_mask[8]) {
+    uint8_t target_hw[8];
+    uint8_t user_mask[8];
+    int y;
+    int seconds;
+    int tolerance;
+    int cursor_x = 0;
+    int cursor_y = 0;
+    int previous_button = GEO_BTN_NONE;
+    int tick = 0;
+    const char *skip_hw = getenv("GEOBOARD_SKIP_HARDWARE");
+    const char *skip_game = getenv("GEOBOARD_SKIP_GAME");
+
+    if (skip_hw != NULL && strcmp(skip_hw, "1") == 0) {
+        printf("[SERVIDOR] GEOBOARD_SKIP_HARDWARE=1, no se envia la mascara al hardware.\n");
+        return;
+    }
+
+    for (y = 0; y < 8; y++) {
+        target_hw[y] = reverse_bits8(final_mask[y]);
+        user_mask[y] = 0u;
+    }
+
+    seconds = get_env_int_range("GEOBOARD_HW_SECONDS", 10, 0, 120);
+    tolerance = get_env_int_range("GEOBOARD_TOLERANCE", 75, 0, 100);
+
+    printf("[SERVIDOR] Iniciando salida fisica mediante libgeoboard.a...\n");
+
+    if (geoboard_init() != 0) {
+        fprintf(stderr,
+                "[SERVIDOR] AVISO: no se pudo abrir /dev/geoboard. "
+                "Se omite salida fisica, pero el procesamiento MPI termino.\n");
+        return;
+    }
+
+    geoboard_clear();
+    geoboard_reset_servo();
+
+    printf("[JUEGO] Mostrando figura objetivo por %d s.\n", seconds);
+    if (geoboard_draw_matrix(target_hw) != 0) {
+        fprintf(stderr, "[SERVIDOR] AVISO: fallo geoboard_draw_matrix().\n");
+        geoboard_close();
+        return;
+    }
+
+    if (seconds > 0) {
+        sleep((unsigned int)seconds);
+    }
+
+    geoboard_clear();
+
+    if (skip_game != NULL && strcmp(skip_game, "1") == 0) {
+        printf("[JUEGO] GEOBOARD_SKIP_GAME=1, se omitio la etapa interactiva.\n");
+        geoboard_close();
+        return;
+    }
+
+    printf("[JUEGO] Replique el contorno con los botones.\n");
+    printf("[JUEGO] UP/DOWN/LEFT/RIGHT mueve cursor, SELECT marca/quita, CHECK valida.\n");
+    printf("[JUEGO] Tolerancia de validacion: %d%%.\n", tolerance);
+
+    for (;;) {
+        int button = geoboard_read_button();
+        uint8_t frame[8];
+
+        if (button != previous_button && button != GEO_BTN_NONE) {
+            switch (button) {
+                case GEO_BTN_UP:
+                    if (cursor_y > 0) cursor_y--;
+                    break;
+                case GEO_BTN_DOWN:
+                    if (cursor_y < 7) cursor_y++;
+                    break;
+                case GEO_BTN_LEFT:
+                    if (cursor_x > 0) cursor_x--;
+                    break;
+                case GEO_BTN_RIGHT:
+                    if (cursor_x < 7) cursor_x++;
+                    break;
+                case GEO_BTN_SELECT:
+                    user_mask[cursor_y] ^= (uint8_t)(1u << cursor_x);
+                    break;
+                case GEO_BTN_CHECK: {
+                    int score = score_mask_pct(user_mask, target_hw);
+                    printf("[JUEGO] Coincidencia usuario/objetivo: %d%%.\n", score);
+
+                    if (score >= tolerance) {
+                        printf("[JUEGO] Correcto.\n");
+                        geoboard_servo(1);
+                        sound_success();
+                        blink_mask(target_hw, 5);
+                        geoboard_servo(0);
+                    } else {
+                        printf("[JUEGO] Incorrecto. Se muestra el contorno correcto.\n");
+                        sound_error();
+                        blink_mask(target_hw, 3);
+                    }
+
+                    geoboard_clear();
+                    geoboard_close();
+                    return;
+                }
+                default:
+                    break;
+            }
+        }
+
+        previous_button = button;
+
+        memcpy(frame, user_mask, sizeof(frame));
+        if ((tick / 8) % 2) {
+            frame[cursor_y] ^= (uint8_t)(1u << cursor_x);
+        }
+
+        geoboard_draw_matrix(frame);
+        tick++;
+        usleep(30000u);
+    }
+}
+
+static void thin_mask_to_outer_contour(uint8_t mask[8]) {
+    uint8_t thinned[8];
+    int row;
+    int col;
+
+    memset(thinned, 0, sizeof(thinned));
+
+    /*
+     * Si el contorno original viene grueso por el grosor del trazo de la
+     * imagen de entrada, se reduce a un contorno 8x8 de un pixel de ancho.
+     * Se conservan los extremos izquierdo/derecho de cada fila y los extremos
+     * superior/inferior de cada columna. Esto evita que un cuadrado aparezca
+     * relleno o con doble grosor en la matriz final.
+     */
+    for (row = 0; row < 8; row++) {
+        int left = -1;
+        int right = -1;
+
+        for (col = 0; col < 8; col++) {
+            if ((mask[row] & (uint8_t)(1u << (7 - col))) != 0u) {
+                if (left < 0) left = col;
+                right = col;
+            }
+        }
+
+        if (left >= 0) {
+            thinned[row] |= (uint8_t)(1u << (7 - left));
+            thinned[row] |= (uint8_t)(1u << (7 - right));
+        }
+    }
+
+    for (col = 0; col < 8; col++) {
+        int top = -1;
+        int bottom = -1;
+
+        for (row = 0; row < 8; row++) {
+            if ((mask[row] & (uint8_t)(1u << (7 - col))) != 0u) {
+                if (top < 0) top = row;
+                bottom = row;
+            }
+        }
+
+        if (top >= 0) {
+            thinned[top] |= (uint8_t)(1u << (7 - col));
+            thinned[bottom] |= (uint8_t)(1u << (7 - col));
+        }
+    }
+
+    memcpy(mask, thinned, sizeof(thinned));
+}
+
 static const char *classify_basic_shape(uint64_t active_pixels,
                                         int32_t bbox_min_x,
                                         int32_t bbox_min_y,
@@ -670,6 +936,9 @@ int server_main(int world_size) {
 
     t_distributed_done = MPI_Wtime();
 
+    thin_mask_to_outer_contour(final_mask);
+    printf("[SERVIDOR] Mascara reducida a contorno externo 8x8 de un pixel.\n");
+
     print_mask(final_mask);
     save_mask_file(mask_path, final_mask);
 
@@ -702,8 +971,10 @@ int server_main(int world_size) {
     printf("[SERVIDOR] - Total servidor: %.3f s\n",
            t_server_end - t_server_start);
 
+    run_hardware_game(final_mask);
+
     printf("[SERVIDOR] Procesamiento distribuido terminado.\n");
-    printf("[SERVIDOR] Siguiente capa pendiente: enviar mask8x8 a libgeoboard.a y luego al driver GPIO.\n");
+    printf("[SERVIDOR] Flujo completo: cliente -> servidor MPI -> workers MPI locales -> libgeoboard.a -> driver GPIO.\n");
 
     free(encrypted_data);
     return EXIT_SUCCESS;
