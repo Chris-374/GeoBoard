@@ -1,0 +1,34 @@
+# Makefile — GeoBoard Local (pipeline de un solo nodo, sin MPI)
+#
+# Coloca este Makefile en la raíz del repositorio (junto a DriverFiles/).
+# Renómbralo a "Makefile" o úsalo con: make -f Makefile_local
+#
+# Uso en el Raspberry Pi:
+#   make -f Makefile_local
+#   sudo ./geoboard_local imagen.pgm
+#
+# Requisitos:
+#   - El módulo geoboard.ko debe estar cargado:
+#       sudo insmod DriverFiles/driver/geoboard.ko
+#   - La librería estática debe existir en DriverFiles/lib/libgeoboard.a
+#     (si no, este Makefile la recompila automáticamente)
+
+CC      = gcc
+CFLAGS  = -O2 -Wall -Wextra
+LDFLAGS = -L./DriverFiles/lib -lgeoboard
+
+TARGET  = geoboard_local
+SRC     = geoboard_local.c
+
+$(TARGET): $(SRC) DriverFiles/lib/libgeoboard.a
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+# Recompila la librería estática si no existe o si geoboard_lib.c cambió
+DriverFiles/lib/libgeoboard.a: DriverFiles/lib/geoboard_lib.c
+	$(CC) $(CFLAGS) -c $< -o DriverFiles/lib/geoboard_lib.o
+	ar rcs $@ DriverFiles/lib/geoboard_lib.o
+
+clean:
+	rm -f $(TARGET) DriverFiles/lib/geoboard_lib.o
+
+.PHONY: clean

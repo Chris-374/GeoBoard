@@ -1,0 +1,15 @@
+
+# GeoBoard generated files
+**/server_output/
+**/batch_logs/
+geoboard_server/server_output/
+server_output/
+
+# Generated heavy test images
+
+geoboard_server/images/
+*.bin
+heavy_*.pgm
+
+decrypted_*.pgm
+encrypted_*.bin

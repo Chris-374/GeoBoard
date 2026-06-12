@@ -1,0 +1,1 @@
+savedcmd_/home/proyecto/proyectoSO/GeoBoard/DriverFiles/driver/Module.symvers :=  scripts/mod/modpost -M -m -a      -o /home/proyecto/proyectoSO/GeoBoard/DriverFiles/driver/Module.symvers -n -T /home/proyecto/proyectoSO/GeoBoard/DriverFiles/driver/modules.order -i Module.symvers -e 

@@ -1,0 +1,58 @@
+/*
+ * geoboard-overlay.dts  ---  Declara los botones del GeoBoard como GPIOs.
+ *
+ * Compilar:   dtc -@ -I dts -O dtb -o geoboard.dtbo geoboard-overlay.dts
+ * Instalar:   sudo cp geoboard.dtbo /boot/firmware/overlays/   (o /boot/overlays)
+ *             y agregar  dtoverlay=geoboard  a /boot/firmware/config.txt
+ * Reiniciar.
+ *
+ * Al declarar los pines aqui, el kernel los resuelve a la linea real sin
+ * importar la base del gpiochip: ya no se necesita gpio_base.
+ */
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2837";   /* Raspberry Pi 3 */
+
+	/* (1) Configura los pines como entrada con pull-up interno. */
+	fragment@0 {
+		target = <&gpio>;
+		__overlay__ {
+			geoboard_pins: geoboard_pins {
+				brcm,pins     = <17 27 22 23 24 25>;
+				brcm,function = <0 0 0 0 0 0>;   /* 0 = entrada      */
+				brcm,pull     = <2 2 2 2 2 2>;   /* 2 = pull-up      */
+			};
+		};
+	};
+
+	/* (2) Crea el dispositivo "geoboard" con un GPIO por boton.
+	 *     El tercer valor (1) = GPIO_ACTIVE_LOW: presionar lleva a 0,
+	 *     pero gpiod_get_value() ya devuelve 1 = presionado.          */
+	fragment@1 {
+		target-path = "/";
+		__overlay__ {
+			geoboard: geoboard {
+				compatible    = "geoboard,buttons";
+				pinctrl-names = "default";
+				pinctrl-0     = <&geoboard_pins>;
+
+				up-gpios      = <&gpio 17 1>;
+				down-gpios    = <&gpio 27 1>;
+				left-gpios    = <&gpio 22 1>;
+				right-gpios   = <&gpio 23 1>;
+				select-gpios  = <&gpio 24 1>;
+				check-gpios   = <&gpio 25 1>;
+
+				/* Buzzer (salida). 0 = GPIO_ACTIVE_HIGH: 1 = suena. */
+				buzzer-gpios  = <&gpio 6 0>;
+
+				/* Servo (salida, PWM por software desde el driver). */
+				servo-gpios   = <&gpio 13 0>;
+
+				status = "okay";
+			};
+		};
+	};
+};
