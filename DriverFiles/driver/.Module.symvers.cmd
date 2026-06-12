@@ -1,1 +1,1 @@
-savedcmd_/home/mauronav006/Documents/GeoBoard/DriverFiles/driver/Module.symvers :=  scripts/mod/modpost -M -m -a      -o /home/mauronav006/Documents/GeoBoard/DriverFiles/driver/Module.symvers -n -T /home/mauronav006/Documents/GeoBoard/DriverFiles/driver/modules.order -i Module.symvers -e 
+savedcmd_/home/proyecto/proyectoSO/GeoBoard/DriverFiles/driver/Module.symvers :=  scripts/mod/modpost -M -m -a      -o /home/proyecto/proyectoSO/GeoBoard/DriverFiles/driver/Module.symvers -n -T /home/proyecto/proyectoSO/GeoBoard/DriverFiles/driver/modules.order -i Module.symvers -e 

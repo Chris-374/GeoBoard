@@ -1,1 +1,1 @@
-/home/mauronav006/Documents/GeoBoard/DriverFiles/driver/geoboard.o
+/home/proyecto/proyectoSO/GeoBoard/DriverFiles/driver/geoboard.o

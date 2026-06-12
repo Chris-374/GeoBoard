@@ -1,1 +1,1 @@
-savedcmd_/home/mauronav006/Documents/GeoBoard/DriverFiles/driver/modules.order := {   echo /home/mauronav006/Documents/GeoBoard/DriverFiles/driver/geoboard.o; :; } > /home/mauronav006/Documents/GeoBoard/DriverFiles/driver/modules.order
+savedcmd_/home/proyecto/proyectoSO/GeoBoard/DriverFiles/driver/modules.order := {   echo /home/proyecto/proyectoSO/GeoBoard/DriverFiles/driver/geoboard.o; :; } > /home/proyecto/proyectoSO/GeoBoard/DriverFiles/driver/modules.order
